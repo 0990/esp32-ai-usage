@@ -1,0 +1,8 @@
+{
+  "port": "AUTO",
+  "baud": 115200,
+  "interval_seconds": 60,
+  "proxy": "",
+  "claude_base_url": "",
+  "codex_endpoint": "https://chatgpt.com/backend-api/wham/usage"
+}

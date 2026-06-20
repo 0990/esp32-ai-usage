@@ -1,0 +1,22 @@
+# ==== 机密：绝不提交 ====
+# 运行配置可能含中转地址等，且 token 文件绝不入库
+host/config.json
+**/auth.json
+**/.credentials.json
+*.token
+
+# ==== Go ====
+host/esp32-ai-credits-host
+host/esp32-ai-credits-host.exe
+host/*.exe
+
+# ==== PlatformIO / 固件构建产物 ====
+firmware/.pio/
+firmware/.vscode/
+.pio/
+
+# ==== 杂项 ====
+*.log
+.DS_Store
+
+.gocache
