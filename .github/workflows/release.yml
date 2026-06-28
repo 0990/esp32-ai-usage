@@ -1,0 +1,42 @@
+# 发布 GitHub Release 时自动构建 Windows exe 并上传为 Release 资产。
+#
+# 本项目是 Fyne 桌面程序，需要 CGO + C 编译器（windows-latest 自带 MinGW-w64 gcc），
+# 故在 Windows runner 上原生构建（CGO 交叉编译 Fyne 很麻烦）。程序本身也是 Windows 专用
+# （开机自启仅 Windows、串口/OLED 场景），因此只产出 Windows amd64。
+name: Build Windows Release
+
+on:
+  release:
+    types: [created]
+
+permissions:
+  contents: write # 需要写权限把 exe 附加到 Release
+
+jobs:
+  build-windows:
+    name: Build Windows exe
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: host # Go module 在 host/ 下
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache-dependency-path: host/go.sum
+
+      - name: Verify gcc (Fyne 需要 CGO)
+        run: gcc --version
+
+      - name: Build exe (-s -w -H=windowsgui)
+        env:
+          CGO_ENABLED: 1
+        run: go build -ldflags "-s -w -H=windowsgui" -o "bin/esp32-ai-credits-${{ github.ref_name }}.exe" .
+
+      - name: Attach exe to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: host/bin/esp32-ai-credits-${{ github.ref_name }}.exe

@@ -9,6 +9,7 @@ host/config.json
 host/esp32-ai-credits-host
 host/esp32-ai-credits-host.exe
 host/*.exe
+host/bin/
 
 # ==== PlatformIO / 固件构建产物 ====
 firmware/.pio/
