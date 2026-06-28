@@ -43,7 +43,7 @@ type GUI struct {
 // RunGUI 构建界面、启动引擎并进入事件循环（阻塞直到退出）。
 // ln 是单实例 listener：后续被双击启动的实例会连上来，唤起本窗口。
 func RunGUI(cfg Config, cfgPath string, ln net.Listener) {
-	a := app.NewWithID("com.local.esp32-ai-credits")
+	a := app.NewWithID("com.local.esp32-ai-usage")
 	icon := fyne.NewStaticResource("icon.png", iconPNG)
 	a.SetIcon(icon)
 

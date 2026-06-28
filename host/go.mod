@@ -1,4 +1,4 @@
-module github.com/local/esp32-ai-credits-host
+module github.com/local/esp32-ai-usage-host
 
 go 1.25.1
 

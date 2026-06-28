@@ -34,9 +34,9 @@ jobs:
       - name: Build exe (-s -w -H=windowsgui)
         env:
           CGO_ENABLED: 1
-        run: go build -ldflags "-s -w -H=windowsgui" -o "bin/esp32-ai-credits-${{ github.ref_name }}.exe" .
+        run: go build -ldflags "-s -w -H=windowsgui" -o "bin/esp32-ai-usage-${{ github.ref_name }}.exe" .
 
       - name: Attach exe to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: host/bin/esp32-ai-credits-${{ github.ref_name }}.exe
+          files: host/bin/esp32-ai-usage-${{ github.ref_name }}.exe

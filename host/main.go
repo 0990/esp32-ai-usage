@@ -1,4 +1,4 @@
-// esp32-ai-credits host：把 Claude / Codex 的 5小时 与 1周 剩余额度，
+// esp32-ai-usage host：把 Claude / Codex 的 5小时 与 1周 剩余额度，
 // 通过 USB 串口推送给 ESP32 + SSD1306 OLED 显示。
 //
 // 取数方式：读取本机已登录的 OAuth token（~/.codex/auth.json、~/.claude/.credentials.json），
@@ -6,7 +6,7 @@
 //
 // 运行方式：直接双击/运行可执行文件，打开 Fyne 桌面界面。后台引擎按 interval
 // 自动拉取并下发串口；界面里可切换显示对象、查看日志、最小化到托盘、发送测试 JSON。
-// 配置文件默认 config.json，也可作为第一个参数传入：esp32-ai-credits.exe my.json
+// 配置文件默认 config.json，也可作为第一个参数传入：esp32-ai-usage.exe my.json
 package main
 
 import (

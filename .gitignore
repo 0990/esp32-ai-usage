@@ -6,8 +6,8 @@ host/config.json
 *.token
 
 # ==== Go ====
-host/esp32-ai-credits-host
-host/esp32-ai-credits-host.exe
+host/esp32-ai-usage-host
+host/esp32-ai-usage-host.exe
 host/*.exe
 host/bin/
 

@@ -100,7 +100,7 @@ func fetchCodex(ctx context.Context, client *http.Client, endpoint string, debug
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("chatgpt-account-id", account)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "esp32-ai-credits/1.0")
+	req.Header.Set("User-Agent", "esp32-ai-usage/1.0")
 
 	resp, err := client.Do(req)
 	if err != nil {

@@ -90,7 +90,7 @@ func fetchClaude(ctx context.Context, client *http.Client, endpoint string, debu
 	req.Header.Set("anthropic-beta", "oauth-2025-04-20")
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "esp32-ai-credits/1.0")
+	req.Header.Set("User-Agent", "esp32-ai-usage/1.0")
 
 	resp, err := client.Do(req)
 	if err != nil {

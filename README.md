@@ -1,4 +1,4 @@
-# esp32-ai-credits
+# esp32-ai-usage
 
 把 **Claude** 和 **Codex** 的「5 小时」「1 周」剩余额度，实时显示在一块通过 USB 连到电脑的
 **ESP32 + SSD1306 OLED** 上，做成桌面物理「额度表」。
@@ -20,7 +20,7 @@
 ## 目录结构
 
 ```
-esp32-ai-credits/
+esp32-ai-usage/
 ├─ host/                     # 电脑端 Go 程序（Fyne 桌面界面）
 │  ├─ main.go                # 配置加载/保存、入口
 │  ├─ engine.go              # 后台引擎：取数循环 + 单点串口写入
@@ -78,16 +78,16 @@ Windows 上装 **MinGW-w64 gcc** 并确保 `gcc` 在 PATH 上（如 `winget inst
 ```bash
 cd host
 
-# 构建（Windows）：会生成 bin/esp32-ai-credits.exe（-H=windowsgui 去掉黑窗口）
+# 构建（Windows）：会生成 bin/esp32-ai-usage.exe（-H=windowsgui 去掉黑窗口）
 build.bat
-# 或手动：set CGO_ENABLED=1 && go build -ldflags "-H=windowsgui" -o bin/esp32-ai-credits.exe .
+# 或手动：set CGO_ENABLED=1 && go build -ldflags "-H=windowsgui" -o bin/esp32-ai-usage.exe .
 
 # 直接跑（开发期）：
 go run .
 ```
 
 首次运行会自动创建配置文件 **`~/.esp32-ai-usage/config.json`** 并默认开启「开机启动」。
-（也可把配置文件路径作为第一个参数传入：`esp32-ai-credits.exe D:\my-config.json`。）
+（也可把配置文件路径作为第一个参数传入：`esp32-ai-usage.exe D:\my-config.json`。）
 
 ### 界面（三个 Tab）
 

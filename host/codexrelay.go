@@ -62,7 +62,7 @@ func relayGet(ctx context.Context, client *http.Client, url, apiKey string) ([]b
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "esp32-ai-credits/1.0")
+	req.Header.Set("User-Agent", "esp32-ai-usage/1.0")
 
 	resp, err := client.Do(req)
 	if err != nil {
