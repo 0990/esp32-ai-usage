@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,11 +19,44 @@ import (
 const defaultCodexEndpoint = "https://chatgpt.com/backend-api/wham/usage"
 
 // codexAuth 对应 ~/.codex/auth.json 里我们需要的字段。
+// 官方订阅有 tokens.access_token；中转站则只有顶层的 OPENAI_API_KEY（sk-...）。
 type codexAuth struct {
-	Tokens struct {
+	OpenAIAPIKey string `json:"OPENAI_API_KEY"`
+	Tokens       struct {
 		AccessToken string `json:"access_token"`
 		AccountID   string `json:"account_id"`
 	} `json:"tokens"`
+}
+
+// codexHome 返回 ~/.codex（尊重 CODEX_HOME）。
+func codexHome() string {
+	if h := os.Getenv("CODEX_HOME"); h != "" {
+		return h
+	}
+	return expandHome("~/.codex")
+}
+
+// loadCodexAuth 读取并解析 ~/.codex/auth.json。
+func loadCodexAuth() (codexAuth, error) {
+	var a codexAuth
+	path := filepath.Join(codexHome(), "auth.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return a, fmt.Errorf("读取 %s 失败: %w", path, err)
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return a, fmt.Errorf("解析 auth.json 失败: %w", err)
+	}
+	return a, nil
+}
+
+// codexIsRelay 根据 auth.json 判断是否为中转站（无官方 OAuth token、但有 OPENAI_API_KEY）。
+func codexIsRelay() bool {
+	a, err := loadCodexAuth()
+	if err != nil {
+		return false
+	}
+	return a.Tokens.AccessToken == "" && a.OpenAIAPIKey != ""
 }
 
 // codexUsageResp 是 wham/usage 的响应（只取用到的字段）。
@@ -39,20 +73,11 @@ type codexWindow struct {
 	ResetAfterSeconds float64 `json:"reset_after_seconds"`
 }
 
-// loadCodexToken 读取 ~/.codex/auth.json（尊重 CODEX_HOME）。
+// loadCodexToken 取官方订阅的 OAuth token + account（中转站没有，会报错）。
 func loadCodexToken() (token, account string, err error) {
-	home := os.Getenv("CODEX_HOME")
-	if home == "" {
-		home = expandHome("~/.codex")
-	}
-	path := filepath.Join(home, "auth.json")
-	raw, err := os.ReadFile(path)
+	a, err := loadCodexAuth()
 	if err != nil {
-		return "", "", fmt.Errorf("读取 %s 失败: %w", path, err)
-	}
-	var a codexAuth
-	if err := json.Unmarshal(raw, &a); err != nil {
-		return "", "", fmt.Errorf("解析 auth.json 失败: %w", err)
+		return "", "", err
 	}
 	if a.Tokens.AccessToken == "" {
 		return "", "", fmt.Errorf("auth.json 中没有 tokens.access_token（未用 ChatGPT 账号登录？）")
@@ -61,17 +86,17 @@ func loadCodexToken() (token, account string, err error) {
 }
 
 // fetchCodex 取 Codex 的 5h/1周额度。失败返回 OK:false 的 Provider 和 error。
-func fetchCodex(client *http.Client, endpoint string, debug bool) Provider {
+// ctx 取消时请求立即中止（退出程序时不会卡在 in-flight 请求上）。
+func fetchCodex(ctx context.Context, client *http.Client, endpoint string, debug bool) (Provider, error) {
 	if endpoint == "" {
 		endpoint = defaultCodexEndpoint
 	}
 	token, account, err := loadCodexToken()
 	if err != nil {
-		logErr("codex", err)
-		return failedProvider()
+		return failedProvider(), err
 	}
 
-	req, _ := http.NewRequest(http.MethodGet, endpoint, nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("chatgpt-account-id", account)
 	req.Header.Set("Accept", "application/json")
@@ -79,8 +104,7 @@ func fetchCodex(client *http.Client, endpoint string, debug bool) Provider {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		logErr("codex", fmt.Errorf("请求 %s 失败: %w", endpoint, err))
-		return failedProvider()
+		return failedProvider(), err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -88,14 +112,13 @@ func fetchCodex(client *http.Client, endpoint string, debug bool) Provider {
 		fmt.Fprintf(os.Stderr, "[debug][codex] GET %s -> %d\n%s\n", endpoint, resp.StatusCode, truncate(body, 2000))
 	}
 	if resp.StatusCode != http.StatusOK {
-		logErr("codex", fmt.Errorf("HTTP %d", resp.StatusCode))
-		return failedProvider()
+		return failedProvider(), fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
 	var u codexUsageResp
 	if err := json.Unmarshal(body, &u); err != nil {
 		logErr("codex", fmt.Errorf("解析响应失败: %w", err))
-		return failedProvider()
+		return failedProvider(), fmt.Errorf("json ummarshal failed:%w", err)
 	}
 	p := Provider{
 		H5: codexWindowToField(u.RateLimit.Primary, "h5"),
@@ -105,7 +128,7 @@ func fetchCodex(client *http.Client, endpoint string, debug bool) Provider {
 	if debug {
 		fmt.Fprintf(os.Stderr, "[debug][codex] parsed: %+v\n", p)
 	}
-	return p
+	return p, nil
 }
 
 func codexWindowToField(w codexWindow, kind string) Window {

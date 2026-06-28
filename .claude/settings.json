@@ -3,7 +3,10 @@
     "allow": [
       "Bash(pio run *)",
       "Bash(go vet *)",
-      "Bash(timeout 4 go run . --simulate --no-serial)"
+      "Bash(timeout 4 go run . --simulate --no-serial)",
+      "PowerShell(gcc --version)",
+      "PowerShell(go version)",
+      "PowerShell(go env CGO_ENABLED)"
     ]
   }
 }

@@ -1,8 +1,17 @@
 {
   "port": "AUTO",
   "baud": 115200,
-  "interval_seconds": 60,
+  "interval_seconds": 300,
+  "retry_interval_seconds": 60,
+  "page_interval_seconds": 4,
+  "provider": "both",
   "proxy": "",
-  "claude_base_url": "",
-  "codex_endpoint": "https://chatgpt.com/backend-api/wham/usage"
+  "claude_endpoint": "",
+  "codex_endpoint": "https://chatgpt.com/backend-api/wham/usage",
+  "codex_mode": "",
+  "codex_relay_types": {
+    "goai.im": "sub2api",
+    "muyuan.do": "new-api"
+  },
+  "autostart": true
 }
