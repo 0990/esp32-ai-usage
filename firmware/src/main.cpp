@@ -184,10 +184,9 @@ void drawMoneyFrame(const Frame &f, bool stale) {
   u8g2.drawDisc(11, 16, 9);
   u8g2.setDrawColor(0);
   u8g2.setFont(u8g2_font_helvB12_tr);
-  const char *sym = (f.ic[0]) ? f.ic : "$";
-  char one[2] = { sym[0], 0 };               // 只在硬币上画符号首字符
+  const char *one = "T";                     // money 帧来自中转站，硬币上画大写 T
   int dw = u8g2.getStrWidth(one);
-  u8g2.drawStr(11 - dw / 2, 21, one);
+  u8g2.drawStr(11 - dw / 2, 23, one);
   u8g2.setDrawColor(1);
 
   const int xL = ICON_W + 2;
