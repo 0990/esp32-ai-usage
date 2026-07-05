@@ -17,6 +17,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -38,6 +39,10 @@ type GUI struct {
 	logLabel  *widget.Label
 	logScroll *container.Scroll
 	status    *widget.Label // 常驻底部的串口状态
+
+	// refreshRelayRows 重建设置页的「中转站类型」域名列表（buildSettingsTab 里赋值）。
+	// 凭据/配置变动时由 OnCredsChange 触发；须在 UI 线程调用。
+	refreshRelayRows func()
 }
 
 // RunGUI 构建界面、启动引擎并进入事件循环（阻塞直到退出）。
@@ -53,6 +58,14 @@ func RunGUI(cfg Config, cfgPath string, ln net.Listener) {
 	// 引擎回调 → UI：一律包进 fyne.Do（Fyne 要求 UI 改动在 UI goroutine）。
 	g.engine.OnLog = func(e LogEntry) { fyne.Do(func() { g.appendLog(e) }) }
 	g.engine.OnStatus = func(s string) { fyne.Do(func() { g.status.SetText(s) }) }
+	// 凭据/配置变动（如切换中转站）→ 自动刷新设置页的中转站域名列表。
+	g.engine.OnCredsChange = func() {
+		fyne.Do(func() {
+			if g.refreshRelayRows != nil {
+				g.refreshRelayRows()
+			}
+		})
+	}
 
 	// 单实例：后启动的实例来敲门时，把本窗口拉到前台（feature 3）。
 	if ln != nil {
@@ -67,7 +80,7 @@ func RunGUI(cfg Config, cfgPath string, ln net.Listener) {
 	g.setupTray(icon)
 	w.SetCloseIntercept(func() { w.Hide() }) // 关窗 → 收进托盘，不退出
 
-	// 首次运行：创建配置文件并按默认值（开机启动）写注册表。
+	// 首次运行：创建配置文件（开机启动默认关闭，setAutostart(false) 只是确保注册表无残留）。
 	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
 		if err := saveConfig(cfgPath, cfg); err != nil {
 			g.engine.log(LogWarn, "engine", "首次写配置失败: %v", err)
@@ -94,8 +107,8 @@ func (g *GUI) buildUI() fyne.CanvasObject {
 	g.status = widget.NewLabel("串口: 未连接")
 
 	tabs := container.NewAppTabs(
-		container.NewTabItem("测试命令", g.buildTestTab()),
 		container.NewTabItem("设置", g.buildSettingsTab()),
+		container.NewTabItem("测试命令", g.buildTestTab()),
 		container.NewTabItem("活动日志", g.buildLogTab()),
 	)
 	tabs.SetTabLocation(container.TabLocationTop)
@@ -153,8 +166,8 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 	pageIntervalEntry := widget.NewEntry()
 	pageIntervalEntry.SetText(strconv.Itoa(cfg.PageIntervalSeconds))
 
-	providerSel := widget.NewSelect([]string{"both", "codex", "claude"}, nil)
-	providerSel.SetSelected(cfg.Provider)
+	providerSel := widget.NewSelect([]string{"codex", "claude", "all"}, nil)
+	providerSel.SetSelected(normalizeProvider(cfg.Provider))
 
 	proxyEntry := widget.NewEntry()
 	proxyEntry.SetText(cfg.Proxy)
@@ -168,34 +181,89 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 	codexEntry.SetText(cfg.CodexEndpoint)
 	codexEntry.SetPlaceHolder(defaultCodexEndpoint)
 
-	codexModeSel := widget.NewSelect([]string{"auto", "official", "relay"}, nil)
-	codexModeSel.SetSelected(orAuto(cfg.CodexMode))
+	// 中转站类型：两列列表（域名 | 类型下拉）。域名自动检测（Codex 走 sk- key 时的
+	// base_url）；已保存过类型的旧域名即使不再使用也保留一行（换站后设置不丢）。
+	var relayRows []*relayTypeRow
+	relayList := container.New(layout.NewFormLayout())
 
-	// 中转站类型映射：每行一条 `主机名=类型`（类型 sub2api / new-api）。
-	// base_url 始终读 ~/.codex/config.toml；按其主机名查此表，未命中则自动识别。
-	relayMapEntry := widget.NewMultiLineEntry()
-	relayMapEntry.SetText(formatRelayTypes(cfg.CodexRelayTypes))
-	relayMapEntry.SetPlaceHolder("每行一条，如：\ngoai.im=sub2api\nmuyuan.do=new-api\n（不在表内的主机名自动识别）")
+	// collectRelayTypes 把列表当前选择收集成映射；auto 不入表（缺省即自动识别）。
+	collectRelayTypes := func() map[string]string {
+		m := map[string]string{}
+		for _, r := range relayRows {
+			if v := r.sel.Selected; v != "" && v != "auto" {
+				m[r.host] = v
+			}
+		}
+		if len(m) == 0 {
+			return nil
+		}
+		return m
+	}
+
+	rebuildRelayRows := func(saved map[string]string) {
+		relayRows = nil
+		relayList.Objects = nil
+		for _, h := range mergedRelayHosts(saved) {
+			sel := widget.NewSelect(relayTypeOptions, nil)
+			sel.SetSelected(normalizeRelayType(saved[h]))
+			relayRows = append(relayRows, &relayTypeRow{host: h, sel: sel})
+			relayList.Add(widget.NewLabel(h))
+			relayList.Add(sel)
+		}
+		if len(relayRows) == 0 {
+			relayList.Add(widget.NewLabel("（未检测到中转站）"))
+			relayList.Add(widget.NewLabel(""))
+		}
+		relayList.Refresh()
+	}
+	rebuildRelayRows(cfg.CodexRelayTypes)
+
+	// 凭据/配置变动（watcher 检测到换站等）→ 自动重建域名列表；
+	// 合并未保存的当前选择，避免正在编辑时被刷掉。由 OnCredsChange 在 UI 线程调用。
+	g.refreshRelayRows = func() {
+		rebuildRelayRows(mergeRelayTypes(g.engine.Config().CodexRelayTypes, collectRelayTypes()))
+		g.fitWindowHeight() // 行数可能变多，窗口跟着长高
+	}
 
 	autostartCheck := widget.NewCheck("开机时自动启动本程序", nil)
 	autostartCheck.SetChecked(cfg.Autostart)
 
-	form := widget.NewForm(
-		widget.NewFormItem("显示对象", providerSel),
+	// 顶部只放常用项；其余折叠进「更多」。
+	fetchNowBtn := widget.NewButton("立即刷新使用量", func() {
+		g.engine.log(LogInfo, "engine", "手动触发：立即拉取使用量")
+		g.engine.Reload()
+	})
+
+	topForm := widget.NewForm(
+		widget.NewFormItem("监控对象", providerSel),
+		widget.NewFormItem("开机启动", autostartCheck),
+		widget.NewFormItem("中转站类型", relayList),
+	)
+	moreForm := widget.NewForm(
 		widget.NewFormItem("串口 Port", portEntry),
 		widget.NewFormItem("波特率 Baud", baudEntry),
 		widget.NewFormItem("刷新间隔(成功,秒)", intervalEntry),
 		widget.NewFormItem("重试间隔(失败,秒)", retryIntervalEntry),
-		widget.NewFormItem("轮播间隔(both,秒)", pageIntervalEntry),
+		widget.NewFormItem("轮播间隔(all,秒)", pageIntervalEntry),
 		widget.NewFormItem("代理 Proxy", proxyEntry),
 		widget.NewFormItem("Claude 端点", claudeEntry),
 		widget.NewFormItem("Codex 端点", codexEntry),
-		widget.NewFormItem("Codex 模式", codexModeSel),
-		widget.NewFormItem("中转站类型映射", relayMapEntry),
-		widget.NewFormItem("开机启动", autostartCheck),
 	)
-	form.SubmitText = "保存"
-	form.OnSubmit = func() {
+	// 「更多」不用 Accordion：展开时窗口直接变长（不出现滚动条），收起时缩回。
+	moreForm.Hide()
+	var moreBtn *widget.Button
+	moreBtn = widget.NewButton("更多 ▾", func() {
+		if moreForm.Visible() {
+			moreForm.Hide()
+			moreBtn.SetText("更多 ▾")
+		} else {
+			moreForm.Show()
+			moreBtn.SetText("收起 ▴")
+		}
+		g.fitWindowHeight()
+	})
+
+	save := func() {
 		baud, err := strconv.Atoi(strings.TrimSpace(baudEntry.Text))
 		if err != nil || baud <= 0 {
 			dialog.ShowError(fmt.Errorf("波特率必须是正整数"), g.win)
@@ -227,8 +295,8 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 			Proxy:                strings.TrimSpace(proxyEntry.Text),
 			ClaudeEndPoint:       strings.TrimSpace(claudeEntry.Text),
 			CodexEndpoint:        strings.TrimSpace(codexEntry.Text),
-			CodexMode:            fromAuto(codexModeSel.Selected),
-			CodexRelayTypes:      parseRelayTypes(relayMapEntry.Text),
+			CodexMode:            old.CodexMode, // UI 已移除，保留配置文件里手写的值
+			CodexRelayTypes:      collectRelayTypes(),
 			Autostart:            autostartCheck.Checked,
 		}
 		if newCfg.Port == "" {
@@ -250,8 +318,27 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 			go g.connectSerial(newCfg)
 		}
 	}
+	saveBtn := widget.NewButton("保存", save)
+	saveBtn.Importance = widget.HighImportance
 
-	return container.NewVScroll(form)
+	return container.NewVBox(
+		container.NewHBox(fetchNowBtn),
+		topForm,
+		moreBtn,
+		moreForm,
+		container.NewHBox(layout.NewSpacer(), saveBtn),
+	)
+}
+
+// fitWindowHeight 让窗口高度跟随内容所需（展开「更多」时拉长、收起时缩回），
+// 避免设置页出现滚动。宽度保持不变，高度不小于初始 520。须在 UI 线程调用。
+func (g *GUI) fitWindowHeight() {
+	cur := g.win.Canvas().Size()
+	need := g.win.Canvas().Content().MinSize().Height + 8
+	if need < 520 {
+		need = 520
+	}
+	g.win.Resize(fyne.NewSize(cur.Width, need))
 }
 
 // buildLogTab：滚动日志 + 清空按钮。
@@ -317,60 +404,80 @@ func (g *GUI) connectSerial(cfg Config) {
 	g.engine.log(LogInfo, "serial", "已连接 %s @ %d", name, cfg.Baud)
 }
 
-// orAuto/fromAuto 在 Select 的 "auto" 与配置里的空串之间转换。
-func orAuto(s string) string {
-	if s == "" {
+// relayTypeRow 是「中转站类型」列表的一行：域名 + 类型下拉。
+type relayTypeRow struct {
+	host string
+	sel  *widget.Select
+}
+
+var relayTypeOptions = []string{"auto", "sub2api", "new-api"}
+
+// normalizeRelayType 把配置里的类型值规范成下拉选项；空/未知一律 auto。
+func normalizeRelayType(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "sub2api":
+		return "sub2api"
+	case "new-api", "newapi", "new_api":
+		return "new-api"
+	default:
 		return "auto"
 	}
-	return s
 }
 
-func fromAuto(s string) string {
-	if s == "auto" {
-		return ""
+// detectRelayHosts 检测当前生效的中转站域名。中转站 = 只用 API key（sk-）取数的站点：
+// 即 Codex 走中转（auth.json 只有 OPENAI_API_KEY）时 ~/.codex/config.toml 的 base_url 域名。
+// Claude 端点是 OAuth token 网关，不属于中转站，不进此列表。
+func detectRelayHosts() []string {
+	var hosts []string
+	if codexIsRelay() {
+		if base, err := loadCodexRelayBaseURL(); err == nil {
+			if h := relayHost(base); h != "" {
+				hosts = append(hosts, h)
+			}
+		}
 	}
-	return s
+	return hosts
 }
 
-// parseRelayTypes 把多行文本（每行 `主机名=类型`）解析成映射；忽略空行/注释/非法行。
-func parseRelayTypes(text string) map[string]string {
+// mergedRelayHosts = 已保存映射里的域名 ∪ 当前检测到的域名（排序稳定显示）。
+// 检测到的域名若已被某个已保存 key 子串命中（如 goai.im 命中 api.goai.im）则不重复加行。
+func mergedRelayHosts(saved map[string]string) []string {
+	set := map[string]bool{}
+	for k := range saved {
+		if k = strings.ToLower(strings.TrimSpace(k)); k != "" {
+			set[k] = true
+		}
+	}
+	for _, h := range detectRelayHosts() {
+		matched := false
+		for k := range set {
+			if strings.Contains(h, k) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			set[h] = true
+		}
+	}
+	hosts := make([]string, 0, len(set))
+	for h := range set {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
+// mergeRelayTypes 合并两个映射，b 覆盖 a（用于「重新检测」时保住未保存的选择）。
+func mergeRelayTypes(a, b map[string]string) map[string]string {
 	m := map[string]string{}
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		k, v = strings.TrimSpace(k), strings.TrimSpace(strings.ToLower(v))
-		if !ok || k == "" || v == "" {
-			continue
-		}
-		m[strings.ToLower(k)] = v
+	for k, v := range a {
+		m[k] = v
 	}
-	if len(m) == 0 {
-		return nil
+	for k, v := range b {
+		m[k] = v
 	}
 	return m
-}
-
-// formatRelayTypes 把映射序列化回多行文本（主机名排序，稳定显示）。
-func formatRelayTypes(m map[string]string) string {
-	if len(m) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	for _, k := range keys {
-		b.WriteString(k)
-		b.WriteByte('=')
-		b.WriteString(m[k])
-		b.WriteByte('\n')
-	}
-	return strings.TrimRight(b.String(), "\n")
 }
 
 // quit 干净退出：停引擎并结束事件循环。

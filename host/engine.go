@@ -39,7 +39,7 @@ type LogEntry struct {
 	Msg   string
 }
 
-// defaultPageInterval 是 both 模式下 host 主动翻页的默认间隔（固件不再自己翻页）；
+// defaultPageInterval 是 all 模式下 host 主动翻页的默认间隔（固件不再自己翻页）；
 // 可由配置 PageIntervalSeconds 覆盖。
 const defaultPageInterval = 4 * time.Second
 
@@ -77,11 +77,14 @@ type Engine struct {
 	codexAt  time.Time
 	relayAt  time.Time
 	started  bool // 是否已完成首轮取数（用于首屏「等待」判定）
-	pageIdx  int  // both 模式当前页索引
+	pageIdx  int  // all 模式当前页索引
 
 	// 回调由界面设置；界面实现体须包进 fyne.Do。
 	OnLog    func(LogEntry)
 	OnStatus func(string)
+	// OnCredsChange 在 watcher 检测到 ~/.codex、~/.claude 凭据/配置变动时调用
+	// （已 debounce），供界面刷新依赖凭据的展示（如中转站域名列表）。
+	OnCredsChange func()
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -270,7 +273,7 @@ func (e *Engine) fetchLoop() {
 // 取数与下发解耦：实际下发由 displayLoop 按页驱动。ctx 取消（退出中）时跳过取消导致的错误日志。
 func (e *Engine) fetchOnce(ctx context.Context, client *http.Client, cfg Config) bool {
 	success := false
-	if cfg.Provider == "codex" || cfg.Provider == "both" {
+	if cfg.Provider == "codex" || cfg.Provider == "all" {
 		if resolveCodexRelay(cfg) { // 中转站：取余额
 			if r, err := fetchCodexRelay(ctx, client, cfg); err != nil {
 				if ctx.Err() == nil {
@@ -301,7 +304,7 @@ func (e *Engine) fetchOnce(ctx context.Context, client *http.Client, cfg Config)
 			}
 		}
 	}
-	if cfg.Provider == "claude" || cfg.Provider == "both" {
+	if cfg.Provider == "claude" || cfg.Provider == "all" {
 		if p, err := fetchClaude(ctx, client, cfg.ClaudeEndPoint, false); err != nil {
 			if ctx.Err() == nil {
 				e.log(LogError, "claude", "%v", err)
@@ -397,10 +400,10 @@ func (e *Engine) buildFrames() []Frame {
 		return nil
 	}
 	var frames []Frame
-	if cfg.Provider == "claude" || cfg.Provider == "both" {
+	if cfg.Provider == "claude" || cfg.Provider == "all" {
 		frames = append(frames, pctFrame("claude", e.claude, stale(e.claudeAt)))
 	}
-	if cfg.Provider == "codex" || cfg.Provider == "both" {
+	if cfg.Provider == "codex" || cfg.Provider == "all" {
 		if e.relay != nil { // codex 走中转 → 中转页
 			frames = append(frames, moneyFrame(*e.relay, stale(e.relayAt)))
 		} else {

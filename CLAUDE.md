@@ -23,7 +23,7 @@
 host/                     # Go 程序（Fyne 桌面 GUI，module: github.com/local/esp32-ai-usage-host）
   main.go                 # config 加载/保存(saveConfig)、固定路径 ~/.esp32-ai-usage/config.json、入口 RunGUI、newHTTPClient
   engine.go               # 后台引擎：取数循环 fetchLoop/fetchOnce(更新缓存)、显示循环 displayLoop(按页轮播下发)、单点写串口 serialWriterLoop、Reload()
-  gui.go                  # Fyne 界面：三个 Tab（测试命令/设置/活动日志）+ 底部串口状态 + 系统托盘
+  gui.go                  # Fyne 界面：三个 Tab（设置/测试命令/活动日志）+ 底部串口状态 + 系统托盘
   singleinstance.go       # 单实例：本地回环端口当锁兼 IPC；后启动实例唤起已有窗口后退出
   watcher.go              # fsnotify 监听 ~/.codex、~/.claude 变动 → 催 Reload() 立即刷新
   autostart_windows.go    # 开机启动：写 HKCU\...\Run 注册表项（golang.org/x/sys/windows/registry）
@@ -39,7 +39,8 @@ host/                     # Go 程序（Fyne 桌面 GUI，module: github.com/loc
 firmware/
   platformio.ini          # 默认 env=esp32-c3，另有 esp32-s3
   src/main.cpp            # 串口收行 + JSON 解析 + 渲染一帧（pct/money 两种页型；不含翻页逻辑）
-README.md                 # 面向用户的完整说明（接线/烧录/运行/排错）
+README.md                 # 面向普通用户的开源首页（亮点/三步上手；技术细节看 PROTOCOL.md 和本文件）
+docs/                     # 动手教程：材料表.md、硬件安装.md、软件使用.md（刷固件+exe 使用）+ images/
 ```
 
 ## 常用命令
@@ -107,18 +108,18 @@ pio device monitor                    # 看串口日志
 - **C3/S3 原生 USB-CDC**：一根 USB 线既供电又当串口；`platformio.ini` 用 `-DARDUINO_USB_CDC_ON_BOOT=1`。
 - **OLED 引脚**：`platformio.ini` 的 `-DPIN_SDA/-DPIN_SCL`（默认 8/9），I2C 地址默认 `0x3C`。
 - **改完必须验证**：host 改动跑 `set CGO_ENABLED=1 && go build -ldflags "-H=windowsgui" ./... && go vet ./...`；固件改动跑 `pio run -e esp32-c3`（已配置可用）。
-- 配置键：`port baud interval_seconds retry_interval_seconds page_interval_seconds provider proxy claude_endpoint codex_endpoint codex_mode codex_relay_types autostart`（见 `config.example.json`；实际存 `~/.esp32-ai-usage/config.json`）。`page_interval_seconds` 是 both 模式轮播翻页间隔（默认 4，秒）。`codex_relay_types` 是 `{主机名:类型}` 映射（旧的 `codex_relay_type`/`codex_relay_base_url` 已移除）。
+- 配置键：`port baud interval_seconds retry_interval_seconds page_interval_seconds provider proxy claude_endpoint codex_endpoint codex_mode codex_relay_types autostart`（见 `config.example.json`；实际存 `~/.esp32-ai-usage/config.json`）。`page_interval_seconds` 是 all 模式轮播翻页间隔（默认 4，秒）。`provider` 取值 `all`/`codex`/`claude`（默认 codex；旧值 both 归一成 all）。`codex_relay_types` 是 `{主机名:类型}` 映射（旧的 `codex_relay_type`/`codex_relay_base_url` 已移除）；设置页展示为两列列表（域名|类型下拉 auto/sub2api/new-api），域名自动检测（`detectRelayHosts`：仅 codex 走 sk- key 中转时读 config.toml base_url；claude 端点是 OAuth 网关不算中转站），已保存类型的旧域名换站后仍保留行，选 auto 即从映射删除；watcher 检测到凭据变动时经 `Engine.OnCredsChange`→`g.refreshRelayRows` 自动重建列表（合并未保存选择）。设置页顶部只放「立即刷新使用量」（调 `engine.Reload()`）、监控对象（provider）、开机启动、中转站类型，其余项折叠在「更多」下（普通按钮切换 Show/Hide，展开/收起时 `fitWindowHeight` 直接调窗口高度，设置页不用滚动容器），保存是独立按钮（不再用 Form.OnSubmit）。`codex_mode` 界面已无设置项，仅手改配置文件生效（保存时透传旧值）。`autostart` 默认 false，需用户手动勾选。
 - 取数间隔自适应：`interval_seconds`（默认 300，成功后用）与 `retry_interval_seconds`（默认 60，失败时用）。启动立即取一次，`fetchOnce` 返回是否成功（任一 provider 取到数据即成功），`fetchLoop` 据此选下次间隔。
 
 ## 易踩的点（GUI 架构）
 
-- **配置路径**：固定 `~/.esp32-ai-usage/config.json`（`defaultConfigPath`）；首次运行（文件不存在）才写默认配置并 `setAutostart(true)`。`loadConfig` 先 `defaultConfig()` 再 `Unmarshal`，所以 JSON 缺 `autostart` 键时仍保持默认 `true`（别改成先零值后 Unmarshal）。
+- **配置路径**：固定 `~/.esp32-ai-usage/config.json`（`defaultConfigPath`）；首次运行（文件不存在）才写默认配置并 `setAutostart(false)`（开机启动默认关）。`loadConfig` 先 `defaultConfig()` 再 `Unmarshal`（JSON 缺键时保持默认值，别改成先零值后 Unmarshal）。
 - **保存即应用**：设置页保存走 `engine.UpdateConfig(cfg)`（整套配置入内存+重建 http client+写盘+催 reload）；`autostart` 另调 `setAutostart`；仅当 port/baud 变化才 `go connectSerial` 重连。没有「逐字段即时生效」。
 - **UI 线程**：引擎 goroutine 回写界面必须包 `fyne.Do(...)`（见 `gui.go` 的 `OnLog`/`OnStatus`）；按钮/表单回调本就在 UI 线程，调引擎方法即可。
 - **串口写入单点化**：只有 `engine.go` 的 `serialWriterLoop` 执行 `port.Write`；显示循环与「发送测试 Frame」都往 `writeCh` 投递，勿在别处直接写串口。
 - **取数/显示解耦**：`fetchOnce` 只更新缓存（`dataMu` 保护的 claude/codex/relay + 时间戳，成功才更新、失败保留上次好数据），不直接下发；下发由 `displayLoop` 按页轮播（间隔来自 `pageInterval()`←配置 `page_interval_seconds`，默认 4s；改「轮播间隔」保存后经 reload→refresh 即时生效）。取到新数据会 `signalRefresh()` 让显示循环立刻重画当前页。`buildFrames()` 据 provider+缓存组装当前页列表，首轮取数前返回 nil（固件停在等待屏）。
 - **取数间隔自适应**：`fetchOnce` 返回 bool（任一 provider 成功即 true）；`fetchLoop` 失败用 `RetryIntervalSeconds`、成功用 `IntervalSeconds`。启动即取一次，因此「失败 60s 重试、首次成功后 300s」是 result-based 实现（后续再失败也会回落到重试间隔）。
-- **provider 取数分支**：`fetchOnce` 用 `== "codex" || == "both"`；codex 走中转时设 `e.relay`，官方时清 `e.relay=nil`（避免残留中转页）；`buildFrames` 据 `e.relay!=nil` 决定 codex 槽位画 `money` 还是 `pct`。
+- **provider 取数分支**：`fetchOnce` 用 `== "codex" || == "all"`（值为 `all`/`codex`/`claude`，默认 codex，旧值 both 由 `normalizeProvider` 归一成 all）；codex 走中转时设 `e.relay`，官方时清 `e.relay=nil`（避免残留中转页）；`buildFrames` 据 `e.relay!=nil` 决定 codex 槽位画 `money` 还是 `pct`。
 - **单实例**：`main()` 先 `acquireSingleInstance()`（占本地回环端口）；占用失败说明已有实例，敲门让其 `w.Show()` 后本进程退出。
 - **文件监听**：`watchCredentials` 用 fsnotify 看 `~/.codex`、`~/.claude` 目录，命中 `auth.json/config.toml/.credentials.json` 变动（debounce 800ms）就 `Reload()` 立即重取。
 - **退出**：`fetchCodex/fetchClaude` 已绑 ctx，退出 `cancel()` 后 in-flight 请求立即中止，不会卡 `Stop()`。

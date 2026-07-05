@@ -5,7 +5,7 @@
 // 调用各客户端内部用的同一个 usage API（不跑模型、不消耗额度）。
 //
 // 运行方式：直接双击/运行可执行文件，打开 Fyne 桌面界面。后台引擎按 interval
-// 自动拉取并下发串口；界面里可切换显示对象、查看日志、最小化到托盘、发送测试 JSON。
+// 自动拉取并下发串口；界面里可切换监控对象、查看日志、最小化到托盘、发送测试 JSON。
 // 配置文件默认 config.json，也可作为第一个参数传入：esp32-ai-usage.exe my.json
 package main
 
@@ -26,15 +26,16 @@ type Config struct {
 	// RetryIntervalSeconds 是取数失败时的重试间隔，默认 60。
 	// 启动先立即取一次：失败按此间隔重试，首次成功后改用 IntervalSeconds。
 	RetryIntervalSeconds int    `json:"retry_interval_seconds"`
-	// PageIntervalSeconds 是 both 模式下轮播翻页的间隔（秒），默认 4。
+	// PageIntervalSeconds 是 all 模式下轮播翻页的间隔（秒），默认 4。
 	PageIntervalSeconds int    `json:"page_interval_seconds"`
-	Provider            string `json:"provider"`        // "both"/"codex"/"claude"：拉取并显示哪个
+	Provider            string `json:"provider"`        // "all"/"codex"/"claude"：拉取并显示哪个（默认 codex；旧值 both 等同 all）
 	Proxy                string `json:"proxy"`           // 显式代理；留空则用 HTTPS_PROXY 环境变量
 	ClaudeEndPoint       string `json:"claude_endpoint"` // 留空则用 ANTHROPIC_BASE_URL 或默认
 	CodexEndpoint        string `json:"codex_endpoint"`  // 官方订阅的 wham/usage，留空用默认
-	Autostart            bool   `json:"autostart"`       // 开机启动，默认 true
+	Autostart            bool   `json:"autostart"`       // 开机启动，默认 false（需用户在设置里手动开启）
 
 	// Codex 取数模式：官方订阅取百分比额度，中转站取余额（relay）。
+	// 界面上已无此设置项，仅供手改配置文件强制覆盖。
 	CodexMode string `json:"codex_mode"` // ""/auto（看 auth.json）| "official" | "relay"
 
 	// CodexRelayTypes 是「中转站主机名 → 类型」映射（如 {"goai.im":"sub2api"}）。
@@ -43,7 +44,7 @@ type Config struct {
 }
 
 func defaultConfig() Config {
-	return Config{Port: "AUTO", Baud: 115200, IntervalSeconds: 300, RetryIntervalSeconds: 60, PageIntervalSeconds: 4, Provider: "both", Autostart: true}
+	return Config{Port: "AUTO", Baud: 115200, IntervalSeconds: 300, RetryIntervalSeconds: 60, PageIntervalSeconds: 4, Provider: "codex", Autostart: false}
 }
 
 // defaultConfigPath 返回固定的配置路径 ~/.esp32-ai-usage/config.json。
@@ -55,15 +56,16 @@ func defaultConfigPath() string {
 	return filepath.Join(home, ".esp32-ai-usage", "config.json")
 }
 
-// normalizeProvider 把配置值规范化为 "both"/"codex"/"claude"，非法值回退 both。
+// normalizeProvider 把配置值规范化为 "all"/"codex"/"claude"；
+// 旧值 "both" 等同 "all"，空/非法值回退默认 "codex"。
 func normalizeProvider(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "codex":
-		return "codex"
+	case "all", "both":
+		return "all"
 	case "claude":
 		return "claude"
 	default:
-		return "both"
+		return "codex"
 	}
 }
 

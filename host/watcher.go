@@ -49,6 +49,9 @@ func watchCredentials(ctx context.Context, e *Engine) {
 	fire := func() {
 		e.log(LogInfo, "watch", "检测到凭据/配置变动，立即刷新")
 		e.Reload()
+		if e.OnCredsChange != nil {
+			e.OnCredsChange()
+		}
 	}
 
 	for {

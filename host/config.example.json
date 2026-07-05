@@ -4,7 +4,7 @@
   "interval_seconds": 300,
   "retry_interval_seconds": 60,
   "page_interval_seconds": 4,
-  "provider": "both",
+  "provider": "codex",
   "proxy": "",
   "claude_endpoint": "",
   "codex_endpoint": "https://chatgpt.com/backend-api/wham/usage",
@@ -13,5 +13,5 @@
     "goai.im": "sub2api",
     "muyuan.do": "new-api"
   },
-  "autostart": true
+  "autostart": false
 }

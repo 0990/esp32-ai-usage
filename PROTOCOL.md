@@ -22,7 +22,7 @@ host 每发一行 JSON 就是「一整屏」(Frame)，固件收到就照着画�
 | 单行长度 | < 600 字节（超长行会被丢弃） |
 
 > 每发一行就整屏刷新一次。非法 JSON、空行（<2 字符）会被静默忽略。
-> 翻页由 host 主动驱动：host 每隔约 4 秒发下一页（`both` 显示对象时在多页间轮播）。
+> 翻页由 host 主动驱动：host 每隔约 4 秒发下一页（`all` 监控对象时在多页间轮播）。
 > 固件不保存历史页、不自己翻页；它永远只显示「最近收到的那一帧」。
 > 兜底：超过 **90 秒**没收到任何新行，固件会本地标 `old`（数据过期）。
 
@@ -117,15 +117,15 @@ host 每发一行 JSON 就是「一整屏」(Frame)，固件收到就照着画�
 
 ## 5. host 如何驱动显示
 
-固件没有「显示对象 / 翻页」概念；这些都在 host 侧实现（见 `host/engine.go` 的 `displayLoop`）：
+固件没有「监控对象 / 翻页」概念；这些都在 host 侧实现（见 `host/engine.go` 的 `displayLoop`）：
 
-| host 的「显示对象」 | host 轮播的页序列 |
+| host 的「监控对象」 | host 轮播的页序列 |
 |----|----|
 | `claude` | 只发 Claude `pct` 页 |
 | `codex`（官方） | 只发 Codex `pct` 页 |
 | `codex`（中转） | 只发 `money` 页 |
-| `both`（官方 codex） | Claude `pct` → Codex `pct`，每 ~4s 翻一页 |
-| `both`（中转 codex） | Claude `pct` → `money`，每 ~4s 翻一页 |
+| `all`（官方 codex） | Claude `pct` → Codex `pct`，每 ~4s 翻一页 |
+| `all`（中转 codex） | Claude `pct` → `money`，每 ~4s 翻一页 |
 
 host 每 ~4 秒发当前页；取到新数据时也会立刻重发当前页。固件只是被动跟随。
 
