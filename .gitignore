@@ -21,3 +21,4 @@ firmware/.vscode/
 .DS_Store
 
 .gocache
+/host/*.exe~
