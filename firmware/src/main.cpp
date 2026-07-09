@@ -18,6 +18,9 @@
 #ifndef PIN_SCL
 #define PIN_SCL 9
 #endif
+#ifndef PIN_RGB
+#define PIN_RGB 8      // ESP32-C3 SuperMini 板载 WS2812 RGB 状态灯
+#endif
 
 // SSD1306 128x32，硬件 I2C，全缓冲。
 U8G2_SSD1306_128X32_UNIVISION_F_HW_I2C u8g2(U8G2_R0, /*reset=*/U8X8_PIN_NONE);
@@ -212,11 +215,44 @@ void drawWaiting() {
   u8g2.sendBuffer();
 }
 
+// ---- 板载 RGB 状态灯（PIN_RGB 上的 WS2812，用核心自带 neopixelWrite 驱动）----
+// 蓝=数据正常，红=数据异常(ERR)，黄=数据过期(old)，红闪=等待电脑。
+// 亮度压低避免刺眼；底层按「实际写入色」去重，减少无谓的 bit-bang。
+enum LedState { LED_WAIT, LED_OK, LED_ERR, LED_OLD };
+
+// 只有目标色和上次写入的不同才真正驱动灯珠。
+void writeLed(uint8_t r, uint8_t g, uint8_t b) {
+  static long last = -1;
+  long cur = ((long)r << 16) | ((long)g << 8) | b;
+  if (cur == last) return;
+  last = cur;
+  neopixelWrite(PIN_RGB, r, g, b);
+}
+
+void setLed(LedState s) {
+  switch (s) {
+    case LED_OK:   writeLed(0,  14, 30); break;  // 蓝（掺点绿去掉紫味）
+    case LED_ERR:  writeLed(48, 0,  0);  break;  // 红
+    case LED_OLD:  writeLed(48, 28, 0);  break;  // 黄
+    case LED_WAIT:                               // 等待电脑：红灯闪烁（~2Hz）
+      if ((millis() / 500) % 2 == 0) writeLed(48, 0, 0);
+      else                           writeLed(0,  0, 0);
+      break;
+  }
+}
+
+// 帧是否处于异常态：pct 任一窗口为 ERR(-1)，或 money 金额两行全空。
+bool frameHasError(const Frame &f) {
+  if (strcmp(f.k, "money") == 0) return f.v1[0] == '\0' && f.v2[0] == '\0';
+  return f.p1 < 0 || f.p2 < 0;
+}
+
 void setup() {
   Serial.begin(115200);
   Wire.begin(PIN_SDA, PIN_SCL);
   u8g2.setI2CAddress(0x3C * 2);
   u8g2.begin();
+  setLed(LED_WAIT);
   drawWaiting();
 }
 
@@ -227,6 +263,17 @@ void loop() {
   static uint32_t lastDraw = 0;
   // host 会自带 old 标记；这里再加一道本地兜底（host 长时间不发就标过期）。
   bool stale = frame.old || (lastUpdateMs != 0 && now - lastUpdateMs > STALE_MS);
+
+  // 状态灯：等待→暗蓝，过期→黄，异常→红，正常→绿（过期优先于异常）。
+  if (lastUpdateMs == 0 || !frame.valid) {
+    setLed(LED_WAIT);
+  } else if (stale) {
+    setLed(LED_OLD);
+  } else if (frameHasError(frame)) {
+    setLed(LED_ERR);
+  } else {
+    setLed(LED_OK);
+  }
 
   // 数据有变化时重画；另外每秒强制刷新一次以更新 stale 标记。
   if (dirty || now - lastDraw > 1000) {
