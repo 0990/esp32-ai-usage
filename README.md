@@ -1,9 +1,9 @@
 # esp32-ai-usage — 桌面 AI 额度小摆件
 
-一个立在桌面上的claude模型小硬件：**实时显示 Codex / Claude / 中转站还剩多少额度**。
+一个立在桌面上的claude模型小硬件：**实时显示 Codex / Claude / Kimi / 中转站还剩多少额度**。
 写代码前瞄一眼，就知道这个 5 小时窗口还能不能放开用、余额还剩几块钱。
 ## 它这样工作
-Codex / Claude 订阅：显示 5 小时和 1 周窗口的剩余百分比、恢复时间：
+Codex / Claude / Kimi 订阅：显示 5 小时和 1 周窗口的剩余百分比、恢复时间：
 
 ![百分比页](docs/images/eu_claude.JPEG)
 
@@ -20,7 +20,7 @@ Codex / Claude 订阅：显示 5 小时和 1 周窗口的剩余百分比、恢�
   ![拨动角度 2](docs/images/eu_show2.JPEG)
 
 - **一根 USB 线搞定**：既供电又传数据，小硬件本身不联网、不存任何账号信息。
-- **不消耗额度**：电脑端程序读的是本机已登录的 Codex / Claude 凭据，
+- **不消耗额度**：电脑端程序读的是本机已登录的 Codex / Claude / Kimi 凭据，
   调用的是客户端内部同款「用量查询」接口——只查询、不跑模型。
 - **材料便宜好买**：核心就是一块 ESP32-C3 和一块 0.91 寸 OLED，动手部分只需焊 4 根线。
 
@@ -35,7 +35,7 @@ Codex / Claude 订阅：显示 5 小时和 1 周窗口的剩余百分比、恢�
 ## 工作原理（一句话版）
 
 ```
-电脑端程序（读本机已登录的 Codex/Claude 凭据，调用官方用量接口）
+电脑端程序（读本机已登录的 Codex/Claude/Kimi 凭据，调用官方用量接口）
         │  USB 串口，每 4 秒发一屏
         ▼
 ESP32-C3 ──I2C──> OLED 小屏（只负责显示，不联网）
@@ -61,6 +61,6 @@ ESP32-C3 ──I2C──> OLED 小屏（只负责显示，不联网）
 
 ## 安全提示
 
-`~/.codex/auth.json`、`~/.claude/.credentials.json` 等同密码。
+`~/.codex/auth.json`、`~/.claude/.credentials.json`、`~/.kimi-code/credentials/kimi-code.json` 等同密码。
 本程序只在你的电脑本地读取它们、只用于调用对应的用量查询接口，不打印、不上传 token。
 请不要把这些文件（以及 `~/.esp32-ai-usage/config.json`）提交到仓库或分享给别人。

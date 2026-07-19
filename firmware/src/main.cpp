@@ -1,10 +1,11 @@
-// ESP32 + SSD1306(128x32 I2C) 显示 Claude / Codex 额度与中转站余额。
+// ESP32 + SSD1306(128x32 I2C) 显示 Claude / Codex / Kimi 额度与中转站余额。
 //
 // 设计：固件「只渲染」。电脑上的 host 程序通过 USB 串口发来一行 JSON（NDJSON），
 // 每行就是「一整屏」(Frame)。翻页/选择显示哪页/是否过期，全部由 host 决定，
 // 固件收到一行就把它画出来，自身不含任何切换逻辑。协议见 PROTOCOL.md。
 //
 //   pct  页：{"ic":"claude","k":"pct","l1":"5h","p1":94,"s1":"15:47","l2":"1w","p2":38,"s2":"06-25 14:30"}
+//          （ic 还可为 "codex" / "kimi"）
 //   money页：{"ic":"$","k":"money","l1":"Today","v1":"$1.2","l2":"Left","v2":"$880"}
 
 #include <Arduino.h>
@@ -43,13 +44,22 @@ static const unsigned char ICON_CODEX[] U8X8_PROGMEM = {
   0xE0, 0xFF, 0x07,  0xC0, 0xFF, 0x03,  0x00, 0xFF, 0x00,  0x00, 0xFF, 0x00,
   0x00, 0x00, 0x00,  0x00, 0x00, 0x00,  0x00, 0x00, 0x00,  0x00, 0x00, 0x00
 };
+// Kimi 图标：字母 "K"。
+static const unsigned char ICON_KIMI[] U8X8_PROGMEM = {
+  0x00, 0x00, 0x00,  0x00, 0x00, 0x00,  0x00, 0x00, 0x00,  0x70, 0x00, 0x0E,
+  0x70, 0x00, 0x07,  0x70, 0x80, 0x03,  0x70, 0xC0, 0x01,  0x70, 0x70, 0x00,
+  0x70, 0x38, 0x00,  0x70, 0x1C, 0x00,  0x70, 0x0E, 0x00,  0x70, 0x0E, 0x00,
+  0x70, 0x1C, 0x00,  0x70, 0x38, 0x00,  0x70, 0x70, 0x00,  0x70, 0xE0, 0x00,
+  0x70, 0xC0, 0x01,  0x70, 0x80, 0x03,  0x70, 0x00, 0x07,  0x70, 0x00, 0x0E,
+  0x70, 0x00, 0x1C,  0x00, 0x00, 0x00,  0x00, 0x00, 0x00,  0x00, 0x00, 0x00
+};
 
 // host 已不再发心跳频率信息；超过这么久没收到新行就本地兜底标 stale。
 static const uint32_t STALE_MS = 90000;
 
 // 一帧 = 一整屏。kind 决定怎么渲染。
 struct Frame {
-  char ic[10] = "";     // pct: "claude"/"codex"；money: 货币符号（画在硬币上）
+  char ic[10] = "";     // pct: "claude"/"codex"/"kimi"；money: 货币符号（画在硬币上）
   char k[8]   = "pct";  // "pct" | "money"
   char l1[14] = "";     // 第 1 行标签
   char l2[14] = "";     // 第 2 行标签
@@ -165,7 +175,9 @@ void drawMoneyRow(int yTop, int xL, int xR, const char *label, const char *val) 
 // pct 帧：左侧 provider 图标 + 两行百分比。
 void drawPctFrame(const Frame &f, bool stale) {
   u8g2.clearBuffer();
-  const unsigned char *icon = (strcmp(f.ic, "codex") == 0) ? ICON_CODEX : ICON_CLAUDE;
+  const unsigned char *icon = ICON_CLAUDE;
+  if (strcmp(f.ic, "codex") == 0) icon = ICON_CODEX;
+  else if (strcmp(f.ic, "kimi") == 0) icon = ICON_KIMI;
   u8g2.drawXBMP(0, (32 - ICON_H) / 2, ICON_W, ICON_H, icon);
 
   const int xL = ICON_W + 2;

@@ -1,7 +1,7 @@
 # 串口显示协议（Host → ESP32）
 
 电脑上的 host 程序通过 USB 串口把数据发给 ESP32，ESP32 在 128×32 OLED 上显示
-Claude / Codex 的额度以及中转站余额。
+Claude / Codex / Kimi 的额度以及中转站余额。
 
 **设计原则：固件只负责「渲染」，不含任何切换/翻页/选择逻辑。**
 host 每发一行 JSON 就是「一整屏」(Frame)，固件收到就照着画。要显示哪一页、什么时候翻页、
@@ -34,14 +34,14 @@ host 每发一行 JSON 就是「一整屏」(Frame)，固件收到就照着画�
 
 | `k` | 含义 | 用途 |
 |-----|------|------|
-| `"pct"`   | 百分比页 | Claude / Codex 官方订阅的 5 小时 + 1 周剩余额度 |
+| `"pct"`   | 百分比页 | Claude / Codex / Kimi 官方订阅的 5 小时 + 1 周剩余额度 |
 | `"money"` | 金额页   | 中转站的「已用 / 今日用量」+ 总余额 |
 
 通用字段：
 
 | 字段 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `ic` | string | — | 图标。`pct` 页：`"claude"` / `"codex"`（内置位图）；`money` 页：货币符号（画在硬币上，如 `"$"`） |
+| `ic` | string | — | 图标。`pct` 页：`"claude"` / `"codex"` / `"kimi"`（内置位图）；`money` 页：货币符号（画在硬币上，如 `"$"`） |
 | `k`  | string | `"pct"` | 页型，见上表 |
 | `l1` | string | — | 第 1 行标签（最长 ~13 字符） |
 | `l2` | string | — | 第 2 行标签 |
@@ -124,8 +124,9 @@ host 每发一行 JSON 就是「一整屏」(Frame)，固件收到就照着画�
 | `claude` | 只发 Claude `pct` 页 |
 | `codex`（官方） | 只发 Codex `pct` 页 |
 | `codex`（中转） | 只发 `money` 页 |
-| `all`（官方 codex） | Claude `pct` → Codex `pct`，每 ~4s 翻一页 |
-| `all`（中转 codex） | Claude `pct` → `money`，每 ~4s 翻一页 |
+| `kimi` | 只发 Kimi `pct` 页 |
+| `all`（官方 codex） | Claude `pct` → Codex `pct` → Kimi `pct`，每 ~4s 翻一页 |
+| `all`（中转 codex） | Claude `pct` → `money` → Kimi `pct`，每 ~4s 翻一页 |
 
 host 每 ~4 秒发当前页；取到新数据时也会立刻重发当前页。固件只是被动跟随。
 

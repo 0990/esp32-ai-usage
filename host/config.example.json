@@ -8,6 +8,7 @@
   "proxy": "",
   "claude_endpoint": "",
   "codex_endpoint": "https://chatgpt.com/backend-api/wham/usage",
+  "kimi_endpoint": "",
   "codex_mode": "",
   "codex_relay_types": {
     "goai.im": "sub2api",

@@ -166,7 +166,7 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 	pageIntervalEntry := widget.NewEntry()
 	pageIntervalEntry.SetText(strconv.Itoa(cfg.PageIntervalSeconds))
 
-	providerSel := widget.NewSelect([]string{"codex", "claude", "all"}, nil)
+	providerSel := widget.NewSelect([]string{"codex", "claude", "kimi", "all"}, nil)
 	providerSel.SetSelected(normalizeProvider(cfg.Provider))
 
 	proxyEntry := widget.NewEntry()

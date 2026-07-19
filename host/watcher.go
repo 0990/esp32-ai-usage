@@ -9,7 +9,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-// watchCredentials 监听 ~/.codex 与 ~/.claude 目录里凭据/配置文件的变动，
+// watchCredentials 监听 ~/.codex、~/.claude 与 ~/.kimi-code/credentials 目录里凭据/配置文件的变动，
 // 一旦变化（debounce 后）就催引擎立即用新配置重新取数显示。
 // 监听目录而非具体文件：很多客户端是「写临时文件再 rename」，只有看目录才抓得到。
 func watchCredentials(ctx context.Context, e *Engine) {
@@ -21,7 +21,7 @@ func watchCredentials(ctx context.Context, e *Engine) {
 	}
 	defer w.Close()
 
-	dirs := []string{codexHome(), expandHome("~/.claude")}
+	dirs := []string{codexHome(), expandHome("~/.claude"), filepath.Join(kimiHome(), "credentials")}
 	watched := 0
 	for _, d := range dirs {
 		if err := w.Add(d); err != nil {
@@ -33,13 +33,13 @@ func watchCredentials(ctx context.Context, e *Engine) {
 	if watched == 0 {
 		return
 	}
-	e.log(LogInfo, "watch", "已监听凭据目录变动（~/.codex、~/.claude）")
+	e.log(LogInfo, "watch", "已监听凭据目录变动（~/.codex、~/.claude、~/.kimi-code/credentials）")
 
 	// 关心的文件名（不区分大小写）：变动这些才触发刷新。
 	interesting := func(p string) bool {
 		name := strings.ToLower(filepath.Base(p))
 		switch name {
-		case "auth.json", "config.toml", ".credentials.json", "settings.json":
+		case "auth.json", "config.toml", ".credentials.json", "settings.json", "kimi-code.json":
 			return true
 		}
 		return false

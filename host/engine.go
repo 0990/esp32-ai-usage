@@ -72,10 +72,12 @@ type Engine struct {
 	dataMu        sync.Mutex
 	claude        Provider  // 官方百分比额度
 	codex         Provider  // 官方百分比额度
+	kimi          Provider  // 官方百分比额度
 	relay         *Relay    // 中转站余额（codex 走中转时）；nil=非中转
 	claudeRelay   *Relay    // 中转站余额（claude 走中转时）；nil=非中转
 	claudeAt      time.Time // 最近一次成功取数时间（用于过期判定）
 	codexAt       time.Time
+	kimiAt        time.Time
 	relayAt       time.Time
 	claudeRelayAt time.Time
 	started       bool // 是否已完成首轮取数（用于首屏「等待」判定）
@@ -337,6 +339,21 @@ func (e *Engine) fetchOnce(ctx context.Context, client *http.Client, cfg Config)
 			}
 		}
 	}
+	if cfg.Provider == "kimi" || cfg.Provider == "all" {
+		if p, err := fetchKimi(ctx, client, cfg.KimiEndpoint, false); err != nil {
+			if ctx.Err() == nil {
+				e.log(LogError, "kimi", "%v", err)
+			}
+		} else {
+			e.dataMu.Lock()
+			e.kimi = p
+			e.kimiAt = time.Now()
+			e.dataMu.Unlock()
+			e.log(LogInfo, "kimi", "5h 剩 %d%% (复位 %s) / 周 剩 %d%% (复位 %s)",
+				p.H5.Left, p.H5.Reset, p.Wk.Left, p.Wk.Reset)
+			success = true
+		}
+	}
 
 	e.dataMu.Lock()
 	e.started = true
@@ -431,6 +448,9 @@ func (e *Engine) buildFrames() []Frame {
 		} else {
 			frames = append(frames, pctFrame("codex", e.codex, stale(e.codexAt)))
 		}
+	}
+	if cfg.Provider == "kimi" || cfg.Provider == "all" {
+		frames = append(frames, pctFrame("kimi", e.kimi, stale(e.kimiAt)))
 	}
 	return frames
 }
