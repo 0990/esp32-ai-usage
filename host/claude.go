@@ -77,6 +77,37 @@ func loadClaudeToken() (string, error) {
 	return c.ClaudeAiOauth.AccessToken, nil
 }
 
+// claudeSettings 取 ~/.claude/settings.json 里 env 段我们需要的字段。
+// 中转站模式下 Claude 用这里的 ANTHROPIC_API_KEY 走 ANTHROPIC_BASE_URL。
+type claudeSettings struct {
+	Env struct {
+		AnthropicAPIKey  string `json:"ANTHROPIC_API_KEY"`
+		AnthropicBaseURL string `json:"ANTHROPIC_BASE_URL"`
+	} `json:"env"`
+}
+
+// loadClaudeRelaySettings 读取 ~/.claude/settings.json，返回中转站 apiKey + base_url。
+// 文件不存在/解析失败返回 error；字段缺失则返回空串（由 claudeIsRelay 判定）。
+func loadClaudeRelaySettings() (apiKey, baseURL string, err error) {
+	path := filepath.Join(expandHome("~/.claude"), "settings.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", fmt.Errorf("read %s failed: %w", path, err)
+	}
+	var s claudeSettings
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", "", fmt.Errorf("parse settings.json failed: %w", err)
+	}
+	return s.Env.AnthropicAPIKey, s.Env.AnthropicBaseURL, nil
+}
+
+// claudeIsRelay 判断 Claude 是否走中转：settings.json 的 env 同时有
+// ANTHROPIC_API_KEY 与 ANTHROPIC_BASE_URL 即为中转站（对齐 codexIsRelay 语义）。
+func claudeIsRelay() bool {
+	key, base, err := loadClaudeRelaySettings()
+	return err == nil && key != "" && base != ""
+}
+
 // ctx 取消时请求立即中止（退出程序时不会卡在 in-flight 请求上）。
 func fetchClaude(ctx context.Context, client *http.Client, endpoint string, debug bool) (Provider, error) {
 	token, err := loadClaudeToken()

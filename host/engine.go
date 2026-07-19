@@ -69,15 +69,17 @@ type Engine struct {
 	refresh chan struct{} // 通知显示循环：缓存已更新，立即重画当前页
 
 	// 取数结果缓存（供显示循环按页渲染），由 dataMu 保护。
-	dataMu   sync.Mutex
-	claude   Provider  // 官方百分比额度
-	codex    Provider  // 官方百分比额度
-	relay    *Relay    // 中转站余额（codex 走中转时）；nil=非中转
-	claudeAt time.Time // 最近一次成功取数时间（用于过期判定）
-	codexAt  time.Time
-	relayAt  time.Time
-	started  bool // 是否已完成首轮取数（用于首屏「等待」判定）
-	pageIdx  int  // all 模式当前页索引
+	dataMu        sync.Mutex
+	claude        Provider  // 官方百分比额度
+	codex         Provider  // 官方百分比额度
+	relay         *Relay    // 中转站余额（codex 走中转时）；nil=非中转
+	claudeRelay   *Relay    // 中转站余额（claude 走中转时）；nil=非中转
+	claudeAt      time.Time // 最近一次成功取数时间（用于过期判定）
+	codexAt       time.Time
+	relayAt       time.Time
+	claudeRelayAt time.Time
+	started       bool // 是否已完成首轮取数（用于首屏「等待」判定）
+	pageIdx       int  // all 模式当前页索引
 
 	// 回调由界面设置；界面实现体须包进 fyne.Do。
 	OnLog    func(LogEntry)
@@ -305,18 +307,34 @@ func (e *Engine) fetchOnce(ctx context.Context, client *http.Client, cfg Config)
 		}
 	}
 	if cfg.Provider == "claude" || cfg.Provider == "all" {
-		if p, err := fetchClaude(ctx, client, cfg.ClaudeEndPoint, false); err != nil {
-			if ctx.Err() == nil {
-				e.log(LogError, "claude", "%v", err)
+		if claudeIsRelay() { // 中转站：取余额
+			if r, err := fetchClaudeRelay(ctx, client, cfg); err != nil {
+				if ctx.Err() == nil {
+					e.log(LogError, "claude-relay", "%v", err)
+				}
+			} else {
+				e.dataMu.Lock()
+				e.claudeRelay = &r
+				e.claudeRelayAt = time.Now()
+				e.dataMu.Unlock()
+				e.log(LogInfo, "claude-relay", "%s %s%g / 余额 %s%g", r.Label, r.Unit, r.Used, r.Unit, r.Balance)
+				success = true
 			}
-		} else {
-			e.dataMu.Lock()
-			e.claude = p
-			e.claudeAt = time.Now()
-			e.dataMu.Unlock()
-			e.log(LogInfo, "claude", "5h 剩 %d%% (复位 %s) / 周 剩 %d%% (复位 %s)",
-				p.H5.Left, p.H5.Reset, p.Wk.Left, p.Wk.Reset)
-			success = true
+		} else { // 官方订阅：取百分比额度
+			if p, err := fetchClaude(ctx, client, cfg.ClaudeEndPoint, false); err != nil {
+				if ctx.Err() == nil {
+					e.log(LogError, "claude", "%v", err)
+				}
+			} else {
+				e.dataMu.Lock()
+				e.claude = p
+				e.claudeAt = time.Now()
+				e.claudeRelay = nil // 切回官方时清掉中转余额，避免残留中转页
+				e.dataMu.Unlock()
+				e.log(LogInfo, "claude", "5h 剩 %d%% (复位 %s) / 周 剩 %d%% (复位 %s)",
+					p.H5.Left, p.H5.Reset, p.Wk.Left, p.Wk.Reset)
+				success = true
+			}
 		}
 	}
 
@@ -401,7 +419,11 @@ func (e *Engine) buildFrames() []Frame {
 	}
 	var frames []Frame
 	if cfg.Provider == "claude" || cfg.Provider == "all" {
-		frames = append(frames, pctFrame("claude", e.claude, stale(e.claudeAt)))
+		if e.claudeRelay != nil { // claude 走中转 → 中转页
+			frames = append(frames, moneyFrame(*e.claudeRelay, stale(e.claudeRelayAt)))
+		} else {
+			frames = append(frames, pctFrame("claude", e.claude, stale(e.claudeAt)))
+		}
 	}
 	if cfg.Provider == "codex" || cfg.Provider == "all" {
 		if e.relay != nil { // codex 走中转 → 中转页

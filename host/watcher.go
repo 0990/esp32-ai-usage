@@ -39,7 +39,7 @@ func watchCredentials(ctx context.Context, e *Engine) {
 	interesting := func(p string) bool {
 		name := strings.ToLower(filepath.Base(p))
 		switch name {
-		case "auth.json", "config.toml", ".credentials.json":
+		case "auth.json", "config.toml", ".credentials.json", "settings.json":
 			return true
 		}
 		return false

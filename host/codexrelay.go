@@ -144,6 +144,34 @@ func fetchCodexRelay(ctx context.Context, client *http.Client, cfg Config) (Rela
 	}
 }
 
+// fetchClaudeRelay 取 Claude 中转站「已用 + 余额」。apiKey/base 来自
+// ~/.claude/settings.json 的 env（ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL）；
+// 类型复用 cfg.CodexRelayTypes（主机名→类型），未配置则自动先试 sub2api 再试 new-api。
+func fetchClaudeRelay(ctx context.Context, client *http.Client, cfg Config) (Relay, error) {
+	apiKey, base, err := loadClaudeRelaySettings()
+	if err != nil {
+		return Relay{}, err
+	}
+	if apiKey == "" || base == "" {
+		return Relay{}, fmt.Errorf("settings.json 缺少 ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL（不是中转站？）")
+	}
+
+	switch resolveCodexRelayType(cfg, base) {
+	case "sub2api":
+		return fetchRelaySub2api(ctx, client, base, apiKey)
+	case "new-api", "newapi", "new_api":
+		return fetchRelayNewAPI(ctx, client, base, apiKey)
+	default: // auto
+		if r, e1 := fetchRelaySub2api(ctx, client, base, apiKey); e1 == nil {
+			return r, nil
+		} else if r2, e2 := fetchRelayNewAPI(ctx, client, base, apiKey); e2 == nil {
+			return r2, nil
+		} else {
+			return Relay{}, fmt.Errorf("自动识别中转站失败：sub2api(%v) / new-api(%v)", e1, e2)
+		}
+	}
+}
+
 // relayUsageBucket 是 sub2api /usage 里 today/total 的金额结构。
 type relayUsageBucket struct {
 	Cost       float64 `json:"cost"`

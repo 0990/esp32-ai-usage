@@ -425,12 +425,20 @@ func normalizeRelayType(v string) string {
 }
 
 // detectRelayHosts 检测当前生效的中转站域名。中转站 = 只用 API key（sk-）取数的站点：
-// 即 Codex 走中转（auth.json 只有 OPENAI_API_KEY）时 ~/.codex/config.toml 的 base_url 域名。
-// Claude 端点是 OAuth token 网关，不属于中转站，不进此列表。
+//   - Codex 走中转（auth.json 只有 OPENAI_API_KEY）时 ~/.codex/config.toml 的 base_url 域名。
+//   - Claude 走中转（~/.claude/settings.json 的 env 同时有 ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL）
+//     时该 base_url 域名。
 func detectRelayHosts() []string {
 	var hosts []string
 	if codexIsRelay() {
 		if base, err := loadCodexRelayBaseURL(); err == nil {
+			if h := relayHost(base); h != "" {
+				hosts = append(hosts, h)
+			}
+		}
+	}
+	if claudeIsRelay() {
+		if _, base, err := loadClaudeRelaySettings(); err == nil {
 			if h := relayHost(base); h != "" {
 				hosts = append(hosts, h)
 			}
