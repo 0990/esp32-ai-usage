@@ -382,6 +382,9 @@ func (g *GUI) setupTray(icon fyne.Resource) {
 	)
 	desk.SetSystemTrayMenu(menu) // 先建托盘
 	desk.SetSystemTrayIcon(icon) // 再设图标
+	// 关联主窗口：点击/双击托盘图标 → 显示主窗口（右键仍弹菜单）。
+	// 内部用的是 systray.SetOnTapped，左键抬起即触发，双击自然生效。
+	desk.SetSystemTrayWindow(g.win)
 }
 
 // connectSerial 在后台连接串口；失败只记日志+置状态，不阻塞界面。
