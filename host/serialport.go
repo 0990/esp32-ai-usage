@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"go.bug.st/serial"
@@ -12,31 +11,33 @@ import (
 // Espressif 原生 USB 的厂商 ID（ESP32-C3 / S3 自带 USB-CDC）。
 const espressifVID = "303A"
 
-// findPort 决定串口名：configured 非 AUTO 时直接用；否则按 Espressif VID 自动识别。
-func findPort(configured string) (string, error) {
+// desiredPort 计算目标串口：configured 非 AUTO 时直接用配置值（不做存在性检查，由打开重试兜底）。
+// AUTO 时枚举：优先 Espressif VID（ESP32-C3/S3 原生 USB）；否则仅在「恰好一个 USB 串口」时
+// 用它兜底（CH340/CP210x 等）。COM1 这类主板自带口不是 USB 设备，绝不兜底选中——
+// 否则会把数据写到错误的口上，且写不报错、占住不释放，重插 ESP32 也切不回来。
+// candidates 返回枚举到的全部串口名，供日志提示。
+func desiredPort(configured string) (name string, ok bool, candidates []string) {
 	if configured != "" && !strings.EqualFold(configured, "AUTO") {
-		return configured, nil
+		return configured, true, nil
 	}
 	ports, err := enumerator.GetDetailedPortsList()
 	if err != nil {
-		return "", err
+		return "", false, nil
 	}
-	var candidates []string
+	var usb []string
 	for _, p := range ports {
 		if p.IsUSB && strings.EqualFold(p.VID, espressifVID) {
-			return p.Name, nil // 命中 ESP32-C3/S3 原生 USB
+			return p.Name, true, nil // 命中 ESP32-C3/S3 原生 USB
+		}
+		if p.IsUSB {
+			usb = append(usb, p.Name)
 		}
 		candidates = append(candidates, p.Name)
 	}
-	if len(candidates) == 1 {
-		return candidates[0], nil // 只有一个串口就用它
+	if len(usb) == 1 {
+		return usb[0], true, candidates // 只有一个 USB 串口就用它
 	}
-	if len(candidates) == 0 {
-		return "", fmt.Errorf("未发现任何串口；请插好 ESP32 或在 config 里写明 port")
-	}
-	fmt.Fprintf(os.Stderr, "[warn] 未能自动识别 ESP32（找 VID=%s）。可用串口: %s\n",
-		espressifVID, strings.Join(candidates, ", "))
-	return "", fmt.Errorf("请在 config.json 的 port 写明具体串口（如 COM5）")
+	return "", false, candidates
 }
 
 // openSerial 打开串口。

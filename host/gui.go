@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -90,8 +89,7 @@ func RunGUI(cfg Config, cfgPath string, ln net.Listener) {
 		}
 	}
 
-	g.engine.Start(context.Background())
-	go g.connectSerial(cfg) // 串口连接放后台；失败不影响界面
+	g.engine.Start(context.Background()) // 含串口连接/断线重连（engine 内的管理循环）
 
 	w.ShowAndRun()
 	g.engine.Stop() // 事件循环结束（真正退出）后清理
@@ -315,7 +313,7 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 		// 串口（port/baud）变化才重连，避免每次保存都打断 ESP32。
 		if newCfg.Port != old.Port || newCfg.Baud != old.Baud {
 			g.engine.log(LogInfo, "serial", "串口设置已变化，重新连接…")
-			go g.connectSerial(newCfg)
+			g.engine.ReconnectSerial()
 		}
 	}
 	saveBtn := widget.NewButton("保存", save)
@@ -385,26 +383,6 @@ func (g *GUI) setupTray(icon fyne.Resource) {
 	// 关联主窗口：点击/双击托盘图标 → 显示主窗口（右键仍弹菜单）。
 	// 内部用的是 systray.SetOnTapped，左键抬起即触发，双击自然生效。
 	desk.SetSystemTrayWindow(g.win)
-}
-
-// connectSerial 在后台连接串口；失败只记日志+置状态，不阻塞界面。
-func (g *GUI) connectSerial(cfg Config) {
-	defer recoverLog("connectSerial")
-	name, err := findPort(cfg.Port)
-	if err != nil {
-		g.engine.log(LogWarn, "serial", "未连接: %v", err)
-		g.engine.status("串口: 未连接")
-		return
-	}
-	p, err := openSerial(name, cfg.Baud)
-	if err != nil {
-		g.engine.log(LogError, "serial", "%v", err)
-		g.engine.status("串口: 打开失败")
-		return
-	}
-	time.Sleep(2 * time.Second) // 等 ESP32 复位就绪
-	g.engine.SetPort(p, fmt.Sprintf("串口: %s @ %d", name, cfg.Baud))
-	g.engine.log(LogInfo, "serial", "已连接 %s @ %d", name, cfg.Baud)
 }
 
 // relayTypeRow 是「中转站类型」列表的一行：域名 + 类型下拉。

@@ -22,7 +22,7 @@
 ```
 host/                     # Go 程序（Fyne 桌面 GUI，module: github.com/local/esp32-ai-usage-host）
   main.go                 # config 加载/保存(saveConfig)、固定路径 ~/.esp32-ai-usage/config.json、入口 RunGUI、newHTTPClient
-  engine.go               # 后台引擎：取数循环 fetchLoop/fetchOnce(更新缓存)、显示循环 displayLoop(按页轮播下发)、单点写串口 serialWriterLoop、Reload()
+  engine.go               # 后台引擎：取数循环 fetchLoop/fetchOnce(更新缓存)、显示循环 displayLoop(按页轮播下发)、单点写串口 serialWriterLoop、串口管理 serialManagerLoop(断线重连)、Reload()
   gui.go                  # Fyne 界面：三个 Tab（设置/测试命令/活动日志）+ 底部串口状态 + 系统托盘
   singleinstance.go       # 单实例：本地回环端口当锁兼 IPC；后启动实例唤起已有窗口后退出
   watcher.go              # fsnotify 监听 ~/.codex、~/.claude 变动 → 催 Reload() 立即刷新
@@ -32,7 +32,7 @@ host/                     # Go 程序（Fyne 桌面 GUI，module: github.com/loc
   codex.go                # loadCodexAuth/loadCodexToken + fetchCodex（官方订阅）+ codexIsRelay 检测
   codexrelay.go           # 中转站余额：读 config.toml base_url + sub2api(/usage) / new-api(billing) 取数
   claude.go               # loadClaudeToken + fetchClaude + resolveClaudeEndpoint（需指向中转地址）
-  serialport.go           # 按 Espressif VID(0x303A) 自动识别 / 打开串口
+  serialport.go           # desiredPort 选目标串口（Espressif VID 0x303A 优先，唯一 USB 串口兜底；COM1 类主板口不兜底）+ openSerial
   util.go                 # parseProxy / logErr / truncate（logErr/truncate 仍被 codex.go/claude.go 用）
   icon.png                # 窗口 / 托盘图标（gui.go 用 //go:embed 嵌入）
   config.example.json     # 仅字段示例；实际配置在 ~/.esp32-ai-usage/config.json
@@ -117,7 +117,8 @@ pio device monitor                    # 看串口日志
 ## 易踩的点（GUI 架构）
 
 - **配置路径**：固定 `~/.esp32-ai-usage/config.json`（`defaultConfigPath`）；首次运行（文件不存在）才写默认配置并 `setAutostart(false)`（开机启动默认关）。`loadConfig` 先 `defaultConfig()` 再 `Unmarshal`（JSON 缺键时保持默认值，别改成先零值后 Unmarshal）。
-- **保存即应用**：设置页保存走 `engine.UpdateConfig(cfg)`（整套配置入内存+重建 http client+写盘+催 reload）；`autostart` 另调 `setAutostart`；仅当 port/baud 变化才 `go connectSerial` 重连。没有「逐字段即时生效」。
+- **保存即应用**：设置页保存走 `engine.UpdateConfig(cfg)`（整套配置入内存+重建 http client+写盘+催 reload）；`autostart` 另调 `setAutostart`；仅当 port/baud 变化才调 `engine.ReconnectSerial()` 重连。没有「逐字段即时生效」。
+- **串口热插拔**：`serialManagerLoop` 每 3s 用 `desiredPort` 算目标串口并与当前口比对——当前口消失（拔掉）或出现更优目标就断开重选，未连接且目标存在就打开；写串口失败也会立即触发重查（覆盖同 COM 号快速拔插、句柄失效的情况）。AUTO 模式的「单口兜底」只认 USB 串口，绝不选主板自带 COM1（写它不报错、会一直占住）。
 - **UI 线程**：引擎 goroutine 回写界面必须包 `fyne.Do(...)`（见 `gui.go` 的 `OnLog`/`OnStatus`）；按钮/表单回调本就在 UI 线程，调引擎方法即可。
 - **串口写入单点化**：只有 `engine.go` 的 `serialWriterLoop` 执行 `port.Write`；显示循环与「发送测试 Frame」都往 `writeCh` 投递，勿在别处直接写串口。
 - **取数/显示解耦**：`fetchOnce` 只更新缓存（`dataMu` 保护的 claude/codex/relay + 时间戳，成功才更新、失败保留上次好数据），不直接下发；下发由 `displayLoop` 按页轮播（间隔来自 `pageInterval()`←配置 `page_interval_seconds`，默认 4s；改「轮播间隔」保存后经 reload→refresh 即时生效）。取到新数据会 `signalRefresh()` 让显示循环立刻重画当前页。`buildFrames()` 据 provider+缓存组装当前页列表，首轮取数前返回 nil（固件停在等待屏）。

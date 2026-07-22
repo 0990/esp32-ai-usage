@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +44,9 @@ type LogEntry struct {
 // 可由配置 PageIntervalSeconds 覆盖。
 const defaultPageInterval = 4 * time.Second
 
+// serialReconnectInterval 是串口未连接时的重连尝试间隔。
+const serialReconnectInterval = 3 * time.Second
+
 // pageInterval 返回当前轮播翻页间隔（读配置 PageIntervalSeconds，非法则回退默认）。
 func (e *Engine) pageInterval() time.Duration {
 	secs := e.Config().PageIntervalSeconds
@@ -61,12 +65,14 @@ type Engine struct {
 	cfgPath string
 	client  *http.Client
 
-	portMu sync.Mutex  // 保护 port 指针
-	port   serial.Port // 可能为 nil（未连接）
+	portMu   sync.Mutex  // 保护 port/portName
+	port     serial.Port // 可能为 nil（未连接）
+	portName string      // 当前端口名（断开为 ""），AUTO 模式用于目标比对
 
-	writeCh chan []byte   // 唯一的串口写入入口
-	reload  chan struct{} // 通知取数循环立即重新拉取
-	refresh chan struct{} // 通知显示循环：缓存已更新，立即重画当前页
+	writeCh   chan []byte   // 唯一的串口写入入口
+	reload    chan struct{} // 通知取数循环立即重新拉取
+	refresh   chan struct{} // 通知显示循环：缓存已更新，立即重画当前页
+	reconnect chan struct{} // 通知串口管理循环：端口已断开/配置已变，立即重连
 
 	// 取数结果缓存（供显示循环按页渲染），由 dataMu 保护。
 	dataMu        sync.Mutex
@@ -101,9 +107,10 @@ func NewEngine(cfg Config, cfgPath string) *Engine {
 		cfg:     cfg,
 		cfgPath: cfgPath,
 		client:  newHTTPClient(cfg.Proxy),
-		writeCh: make(chan []byte, 8),
-		reload:  make(chan struct{}, 1),
-		refresh: make(chan struct{}, 1),
+		writeCh:   make(chan []byte, 8),
+		reload:    make(chan struct{}, 1),
+		refresh:   make(chan struct{}, 1),
+		reconnect: make(chan struct{}, 1),
 	}
 }
 
@@ -163,16 +170,34 @@ func (e *Engine) signalRefresh() {
 	}
 }
 
-// SetPort 设置/更换串口；关闭旧的并刷新状态。传 nil 表示断开。
-func (e *Engine) SetPort(p serial.Port, status string) {
+// setPort 设置/更换串口；关闭旧的并刷新状态。name 为当前端口名，传 "" 表示断开。
+func (e *Engine) setPort(p serial.Port, name, status string) {
 	e.portMu.Lock()
 	old := e.port
-	e.port = p
+	e.port, e.portName = p, name
 	e.portMu.Unlock()
 	if old != nil {
 		old.Close()
 	}
 	e.status(status)
+}
+
+// ReconnectSerial 关闭当前串口并催串口管理循环立即按最新配置重连
+// （界面在 port/baud 变更后调用）。信号容量 1，已有挂起信号则合并。
+func (e *Engine) ReconnectSerial() {
+	e.setPort(nil, "", "串口: 重连中…")
+	select {
+	case e.reconnect <- struct{}{}:
+	default:
+	}
+}
+
+// signalReconnect 非阻塞地催串口管理循环立即重连（写失败判定断开时用）。
+func (e *Engine) signalReconnect() {
+	select {
+	case e.reconnect <- struct{}{}:
+	default:
+	}
 }
 
 // Send 把一行 JSON 投到串口写入队列（自动补 \n）。取数循环与测试按钮都走这里。
@@ -192,10 +217,11 @@ func (e *Engine) Send(line []byte) {
 	}
 }
 
-// Start 启动串口写入、取数、显示三个 goroutine，外加凭据文件监听。
+// Start 启动串口管理、串口写入、取数、显示四个 goroutine，外加凭据文件监听。
 func (e *Engine) Start(ctx context.Context) {
 	e.ctx, e.cancel = context.WithCancel(ctx)
-	e.wg.Add(3)
+	e.wg.Add(4)
+	go e.serialManagerLoop()
 	go e.serialWriterLoop()
 	go e.fetchLoop()
 	go e.displayLoop()
@@ -211,15 +237,18 @@ func (e *Engine) Stop() {
 	e.portMu.Lock()
 	if e.port != nil {
 		e.port.Close()
-		e.port = nil
+		e.port, e.portName = nil, ""
 	}
 	e.portMu.Unlock()
 }
 
 // serialWriterLoop 是唯一执行 port.Write 的地方，从结构上杜绝并发写。
+// 写失败视为设备已断开（如 ESP32 被拔掉）：清空端口并催管理循环重连，
+// 重插后由 serialManagerLoop 自动恢复，无需重启 host。
 func (e *Engine) serialWriterLoop() {
 	defer e.wg.Done()
 	defer recoverLog("serialWriterLoop")
+	var lastDropLog time.Time // 「未连接丢弃」日志限流，避免断连期间刷屏
 	for {
 		select {
 		case <-e.ctx.Done():
@@ -229,14 +258,96 @@ func (e *Engine) serialWriterLoop() {
 			p := e.port
 			e.portMu.Unlock()
 			if p == nil {
-				e.log(LogWarn, "serial", "串口未连接，丢弃 %d 字节", len(line))
+				if time.Since(lastDropLog) > time.Minute {
+					e.log(LogWarn, "serial", "串口未连接，丢弃 %d 字节（同类日志每分钟最多一条）", len(line))
+					lastDropLog = time.Now()
+				}
 				continue
 			}
 			if _, err := p.Write(line); err != nil {
-				e.log(LogError, "serial", "写串口失败: %v", err)
+				e.log(LogError, "serial", "写串口失败: %v（视为已断开，等待重连）", err)
+				e.setPort(nil, "", "串口: 已断开，等待重连…")
+				e.signalReconnect()
 			}
 		}
 	}
+}
+
+// serialManagerLoop 负责串口的连接与断线重连。每 serialReconnectInterval 重新计算
+// 「目标串口」（desiredPort）并与当前口比对：
+//   - 当前口已不在枚举里（被拔掉）或出现了更优目标（如 AUTO 兜底换成真 ESP32）→ 断开重选；
+//   - 未连接且目标存在 → 打开；
+//   - 目标不存在 → 状态栏置未连接，继续等。
+//
+// reconnect 信号（写失败/配置变更）可提前唤醒立即重查；写失败那条快速通道覆盖
+// 「同 COM 号快速拔插、枚举名没变但句柄已失效」的情况。这样 ESP32 拔掉再插上、
+// 或 host 启动时设备还没插，都能自动识别恢复，无需重启 host。
+func (e *Engine) serialManagerLoop() {
+	defer e.wg.Done()
+	defer recoverLog("serialManagerLoop")
+	firstTry := true // 每个断连周期只记一次日志，避免重试刷屏
+	for {
+		cfg := e.Config()
+		desired, ok, candidates := desiredPort(cfg.Port)
+
+		e.portMu.Lock()
+		cur, curName := e.port, e.portName
+		e.portMu.Unlock()
+
+		switch {
+		case cur != nil && (!ok || desired != curName):
+			// 当前口被拔掉/目标变了 → 断开，立即重选（不等间隔）
+			e.log(LogInfo, "serial", "%s 已不可用，重新选择串口…", curName)
+			e.setPort(nil, "", "串口: 未连接")
+			firstTry = true
+			continue
+		case cur == nil && ok:
+			e.tryOpen(desired, cfg.Baud, firstTry)
+			firstTry = false
+		case cur == nil && !ok:
+			if firstTry {
+				hint := strings.Join(candidates, ", ")
+				if hint == "" {
+					hint = "（无）"
+				}
+				e.log(LogWarn, "serial", "未发现 ESP32 串口（找 VID=%s）。可用串口: %s", espressifVID, hint)
+			}
+			e.status("串口: 未连接")
+			firstTry = false
+		default: // 已连接且目标未变
+			firstTry = true
+		}
+
+		timer := time.NewTimer(serialReconnectInterval)
+		select {
+		case <-e.ctx.Done():
+			timer.Stop()
+			return
+		case <-e.reconnect: // 写失败/配置变更 → 立即重查，不等间隔
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
+}
+
+// tryOpen 打开目标串口并设为当前口；logFail 为 false 时失败静默（只更新状态栏）。
+func (e *Engine) tryOpen(name string, baud int, logFail bool) {
+	p, err := openSerial(name, baud)
+	if err != nil {
+		if logFail {
+			e.log(LogError, "serial", "%v", err)
+		}
+		e.status("串口: 打开失败")
+		return
+	}
+	select {
+	case <-e.ctx.Done(): // 退出中：别留着新开的端口
+		p.Close()
+		return
+	case <-time.After(2 * time.Second): // 等 ESP32 复位就绪
+	}
+	e.setPort(p, name, fmt.Sprintf("串口: %s @ %d", name, baud))
+	e.log(LogInfo, "serial", "已连接 %s @ %d", name, baud)
 }
 
 // fetchLoop 启动即立即取一次；之后按结果选间隔：失败用 RetryIntervalSeconds、
