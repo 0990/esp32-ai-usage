@@ -28,7 +28,7 @@ type Config struct {
 	RetryIntervalSeconds int    `json:"retry_interval_seconds"`
 	// PageIntervalSeconds 是 all 模式下轮播翻页的间隔（秒），默认 4。
 	PageIntervalSeconds int    `json:"page_interval_seconds"`
-	Provider            string `json:"provider"`        // "all"/"codex"/"claude"/"kimi"：拉取并显示哪个（默认 codex；旧值 both 等同 all）
+	Provider            string `json:"provider"`        // 监控对象："all" 或逗号分隔子集（如 "codex,kimi"），默认 codex；旧值 both 等同 all
 	Proxy                string `json:"proxy"`           // 显式代理；留空则用 HTTPS_PROXY 环境变量
 	ClaudeEndPoint       string `json:"claude_endpoint"` // 留空则用 ANTHROPIC_BASE_URL 或默认
 	CodexEndpoint        string `json:"codex_endpoint"`  // 官方订阅的 wham/usage，留空用默认
@@ -57,19 +57,63 @@ func defaultConfigPath() string {
 	return filepath.Join(home, ".esp32-ai-usage", "config.json")
 }
 
-// normalizeProvider 把配置值规范化为 "all"/"codex"/"claude"/"kimi"；
-// 旧值 "both" 等同 "all"，空/非法值回退默认 "codex"。
-func normalizeProvider(s string) string {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "all", "both":
-		return "all"
-	case "claude":
-		return "claude"
-	case "kimi":
-		return "kimi"
-	default:
-		return "codex"
+// providerOrder 是监控对象的固定顺序（界面勾选框与存储串都按此序）。
+var providerOrder = []string{"codex", "claude", "kimi"}
+
+// parseProviders 把配置值解析成监控对象集合：支持逗号分隔多选（如 "codex,kimi"）；
+// "all"/"both" 等同全选；空或全部非法时回退默认 {codex}。
+func parseProviders(s string) map[string]bool {
+	set := map[string]bool{}
+	for _, tok := range strings.Split(s, ",") {
+		switch strings.ToLower(strings.TrimSpace(tok)) {
+		case "all", "both":
+			for _, p := range providerOrder {
+				set[p] = true
+			}
+		case "codex", "claude", "kimi":
+			set[strings.ToLower(strings.TrimSpace(tok))] = true
+		}
 	}
+	if len(set) == 0 {
+		set["codex"] = true
+	}
+	return set
+}
+
+// joinProviders 把集合转成规范存储串：全选归一成 "all"，否则按 providerOrder 逗号连接。
+func joinProviders(set map[string]bool) string {
+	if len(set) == len(providerOrder) {
+		return "all"
+	}
+	var out []string
+	for _, p := range providerOrder {
+		if set[p] {
+			out = append(out, p)
+		}
+	}
+	return strings.Join(out, ",")
+}
+
+// normalizeProvider 把配置值规范化（全选 → "all"，多选排序去重，非法回退默认）。
+func normalizeProvider(s string) string {
+	return joinProviders(parseProviders(s))
+}
+
+// providerList 把配置值解析成有序列表（供界面勾选框 SetSelected）。
+func providerList(s string) []string {
+	set := parseProviders(s)
+	var out []string
+	for _, p := range providerOrder {
+		if set[p] {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// wants 报告某个监控对象是否被配置选中。
+func (c Config) wants(name string) bool {
+	return parseProviders(c.Provider)[name]
 }
 
 func loadConfig(path string) Config {

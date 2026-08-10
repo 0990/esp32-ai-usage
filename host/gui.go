@@ -164,8 +164,10 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 	pageIntervalEntry := widget.NewEntry()
 	pageIntervalEntry.SetText(strconv.Itoa(cfg.PageIntervalSeconds))
 
-	providerSel := widget.NewSelect([]string{"codex", "claude", "kimi", "all"}, nil)
-	providerSel.SetSelected(normalizeProvider(cfg.Provider))
+	// 监控对象：横向多选框，可同时勾多个（如 kimi+codex），轮播显示；全勾存为 "all"。
+	providerChecks := widget.NewCheckGroup(providerOrder, nil)
+	providerChecks.Horizontal = true
+	providerChecks.SetSelected(providerList(cfg.Provider))
 
 	proxyEntry := widget.NewEntry()
 	proxyEntry.SetText(cfg.Proxy)
@@ -233,7 +235,7 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 	})
 
 	topForm := widget.NewForm(
-		widget.NewFormItem("监控对象", providerSel),
+		widget.NewFormItem("监控对象", providerChecks),
 		widget.NewFormItem("开机启动", autostartCheck),
 		widget.NewFormItem("中转站类型", relayList),
 	)
@@ -242,7 +244,7 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 		widget.NewFormItem("波特率 Baud", baudEntry),
 		widget.NewFormItem("刷新间隔(成功,秒)", intervalEntry),
 		widget.NewFormItem("重试间隔(失败,秒)", retryIntervalEntry),
-		widget.NewFormItem("轮播间隔(all,秒)", pageIntervalEntry),
+		widget.NewFormItem("轮播间隔(秒)", pageIntervalEntry),
 		widget.NewFormItem("代理 Proxy", proxyEntry),
 		widget.NewFormItem("Claude 端点", claudeEntry),
 		widget.NewFormItem("Codex 端点", codexEntry),
@@ -282,6 +284,14 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 			dialog.ShowError(fmt.Errorf("轮播间隔必须是正整数"), g.win)
 			return
 		}
+		if len(providerChecks.Selected) == 0 {
+			dialog.ShowError(fmt.Errorf("请至少勾选一个监控对象"), g.win)
+			return
+		}
+		providers := map[string]bool{}
+		for _, p := range providerChecks.Selected {
+			providers[p] = true
+		}
 		old := g.engine.Config()
 		newCfg := Config{
 			Port:                 strings.TrimSpace(portEntry.Text),
@@ -289,7 +299,7 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 			IntervalSeconds:      interval,
 			RetryIntervalSeconds: retryInterval,
 			PageIntervalSeconds:  pageInterval,
-			Provider:             providerSel.Selected,
+			Provider:             joinProviders(providers),
 			Proxy:                strings.TrimSpace(proxyEntry.Text),
 			ClaudeEndPoint:       strings.TrimSpace(claudeEntry.Text),
 			CodexEndpoint:        strings.TrimSpace(codexEntry.Text),

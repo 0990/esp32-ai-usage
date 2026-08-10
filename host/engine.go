@@ -388,7 +388,7 @@ func (e *Engine) fetchLoop() {
 // 取数与下发解耦：实际下发由 displayLoop 按页驱动。ctx 取消（退出中）时跳过取消导致的错误日志。
 func (e *Engine) fetchOnce(ctx context.Context, client *http.Client, cfg Config) bool {
 	success := false
-	if cfg.Provider == "codex" || cfg.Provider == "all" {
+	if cfg.wants("codex") {
 		if resolveCodexRelay(cfg) { // 中转站：取余额
 			if r, err := fetchCodexRelay(ctx, client, cfg); err != nil {
 				if ctx.Err() == nil {
@@ -419,7 +419,7 @@ func (e *Engine) fetchOnce(ctx context.Context, client *http.Client, cfg Config)
 			}
 		}
 	}
-	if cfg.Provider == "claude" || cfg.Provider == "all" {
+	if cfg.wants("claude") {
 		if claudeIsRelay() { // 中转站：取余额
 			if r, err := fetchClaudeRelay(ctx, client, cfg); err != nil {
 				if ctx.Err() == nil {
@@ -450,7 +450,7 @@ func (e *Engine) fetchOnce(ctx context.Context, client *http.Client, cfg Config)
 			}
 		}
 	}
-	if cfg.Provider == "kimi" || cfg.Provider == "all" {
+	if cfg.wants("kimi") {
 		if p, err := fetchKimi(ctx, client, cfg.KimiEndpoint, false); err != nil {
 			if ctx.Err() == nil {
 				e.log(LogError, "kimi", "%v", err)
@@ -546,21 +546,21 @@ func (e *Engine) buildFrames() []Frame {
 		return nil
 	}
 	var frames []Frame
-	if cfg.Provider == "claude" || cfg.Provider == "all" {
+	if cfg.wants("claude") {
 		if e.claudeRelay != nil { // claude 走中转 → 中转页
 			frames = append(frames, moneyFrame(*e.claudeRelay, stale(e.claudeRelayAt)))
 		} else {
 			frames = append(frames, pctFrame("claude", e.claude, stale(e.claudeAt)))
 		}
 	}
-	if cfg.Provider == "codex" || cfg.Provider == "all" {
+	if cfg.wants("codex") {
 		if e.relay != nil { // codex 走中转 → 中转页
 			frames = append(frames, moneyFrame(*e.relay, stale(e.relayAt)))
 		} else {
 			frames = append(frames, pctFrame("codex", e.codex, stale(e.codexAt)))
 		}
 	}
-	if cfg.Provider == "kimi" || cfg.Provider == "all" {
+	if cfg.wants("kimi") {
 		frames = append(frames, pctFrame("kimi", e.kimi, stale(e.kimiAt)))
 	}
 	return frames
