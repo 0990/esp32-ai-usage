@@ -128,7 +128,12 @@ func fetchCodexRelay(ctx context.Context, client *http.Client, cfg Config) (Rela
 		return Relay{}, err
 	}
 
-	switch resolveCodexRelayType(cfg, base) {
+	return fetchRelayTyped(ctx, client, resolveCodexRelayType(cfg, base), base, apiKey)
+}
+
+// fetchRelayTyped 按类型取中转站「已用 + 余额」；typ 为 ""（自动）时先试 sub2api 再试 new-api。
+func fetchRelayTyped(ctx context.Context, client *http.Client, typ, base, apiKey string) (Relay, error) {
+	switch typ {
 	case "sub2api":
 		return fetchRelaySub2api(ctx, client, base, apiKey)
 	case "new-api", "newapi", "new_api":
@@ -145,31 +150,40 @@ func fetchCodexRelay(ctx context.Context, client *http.Client, cfg Config) (Rela
 }
 
 // fetchClaudeRelay 取 Claude 中转站「已用 + 余额」。apiKey/base 来自
-// ~/.claude/settings.json 的 env（ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL）；
-// 类型复用 cfg.CodexRelayTypes（主机名→类型），未配置则自动先试 sub2api 再试 new-api。
+// ~/.claude/settings.json 的 env（ANTHROPIC_API_KEY 或 ANTHROPIC_AUTH_TOKEN /
+// ANTHROPIC_BASE_URL）；类型复用 cfg.CodexRelayTypes（主机名→类型），未配置则自动。
+// Claude 的 base_url 是 Anthropic 风格、通常不带 /v1，而余额接口挂在 OpenAI 风格
+// 的 /v1 根下，故按 relayBaseCandidates 逐个候选根尝试。
 func fetchClaudeRelay(ctx context.Context, client *http.Client, cfg Config) (Relay, error) {
 	apiKey, base, err := loadClaudeRelaySettings()
 	if err != nil {
 		return Relay{}, err
 	}
 	if apiKey == "" || base == "" {
-		return Relay{}, fmt.Errorf("settings.json 缺少 ANTHROPIC_API_KEY/ANTHROPIC_BASE_URL（不是中转站？）")
+		return Relay{}, fmt.Errorf("settings.json 缺少 ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN 或 ANTHROPIC_BASE_URL（不是中转站？）")
 	}
 
-	switch resolveCodexRelayType(cfg, base) {
-	case "sub2api":
-		return fetchRelaySub2api(ctx, client, base, apiKey)
-	case "new-api", "newapi", "new_api":
-		return fetchRelayNewAPI(ctx, client, base, apiKey)
-	default: // auto
-		if r, e1 := fetchRelaySub2api(ctx, client, base, apiKey); e1 == nil {
+	typ := resolveCodexRelayType(cfg, base)
+	var errs []string
+	for _, b := range relayBaseCandidates(base) {
+		if r, e := fetchRelayTyped(ctx, client, typ, b, apiKey); e == nil {
 			return r, nil
-		} else if r2, e2 := fetchRelayNewAPI(ctx, client, base, apiKey); e2 == nil {
-			return r2, nil
 		} else {
-			return Relay{}, fmt.Errorf("自动识别中转站失败：sub2api(%v) / new-api(%v)", e1, e2)
+			errs = append(errs, fmt.Sprintf("%s(%v)", b, e))
 		}
 	}
+	return Relay{}, fmt.Errorf("拉取中转站余额失败：%s", strings.Join(errs, "；"))
+}
+
+// relayBaseCandidates 返回余额接口的候选 API 根。Claude 的 ANTHROPIC_BASE_URL 通常
+// 不带 /v1（Claude Code 自己拼 /v1/messages），而中转站余额接口挂在 /v1 根下，
+// 故优先补 /v1，原始 base 作兜底；已带 /v1 则直接用。
+func relayBaseCandidates(base string) []string {
+	base = strings.TrimRight(base, "/")
+	if strings.HasSuffix(base, "/v1") {
+		return []string{base}
+	}
+	return []string{base + "/v1", base}
 }
 
 // relayUsageBucket 是 sub2api /usage 里 today/total 的金额结构。

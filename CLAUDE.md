@@ -30,8 +30,9 @@ host/                     # Go 程序（Fyne 桌面 GUI，module: github.com/loc
   autostart_other.go      # 非 Windows 的 setAutostart 空实现（//go:build !windows）
   common.go               # Window/Provider/Relay/Frame 类型 + pctFrame/moneyFrame 构造、时间格式化、百分比换算
   codex.go                # loadCodexAuth/loadCodexToken + fetchCodex（官方订阅）+ codexIsRelay 检测
-  codexrelay.go           # 中转站余额：读 config.toml base_url + sub2api(/usage) / new-api(billing) 取数
-  claude.go               # loadClaudeToken + fetchClaude + resolveClaudeEndpoint（需指向中转地址）
+  codexrelay.go           # 中转站余额（codex+claude 共用）：sub2api(/usage) / new-api(billing) 取数；claude 侧按 relayBaseCandidates 先试 <base>/v1 再试原始 base
+  claude.go               # loadClaudeToken + fetchClaude（官方 OAuth）+ loadClaudeRelaySettings/claudeIsRelay（中转检测，env 取 ANTHROPIC_API_KEY/AUTH_TOKEN）
+  ccswitch.go             # cc-switch 本地代理回溯：settings.json 的 base_url 指回环地址时，从其 SQLite 库读当前供应商的真实 base/key
   serialport.go           # desiredPort 选目标串口（Espressif VID 0x303A 优先，唯一 USB 串口兜底；COM1 类主板口不兜底）+ openSerial
   util.go                 # parseProxy / logErr / truncate（logErr/truncate 仍被 codex.go/claude.go 用）
   icon.png                # 窗口 / 托盘图标（gui.go 用 //go:embed 嵌入）
@@ -95,11 +96,17 @@ pio device monitor                    # 看串口日志
     **new-api 展示「累计已用」**（`Relay.Label="Used"`）：billing 仿真 `<base>/dashboard/billing/subscription`(`hard_limit_usd`)−`/usage`(`total_usage` 美分,累计)，余额=总额−累计。
     ⚠️ new-api **没有可用 API key 调的「按时间段聚合」接口**（`SumUsedQuota` 只挂在 `/api/log/self/stat`、`/api/log/stat`，需网页登录态/用户 access token；`sk-` key 只能调 billing、`/api/usage/token`、`/api/log/token`，全是累计/原始日志），故展示累计已用而非今日。源码在 `D:\workspace\ai\new-api`（`controller/billing.go`、`router/*`、`common.QuotaPerUnit=500000`）。
     已实测：goai.im=sub2api；muyuan.do=new-api（余额 880−累计=`$879.58`、已用 `$0.42`；该 key `unlimited_quota` 故 `/api/usage/token` 余额不可用，余额取 billing）。
-- **Claude（需中转）⚠️**：token 在 `~/.claude/.credentials.json` → `claudeAiOauth.accessToken`；
-  `GET <base>/api/oauth/usage`，头还要 `anthropic-beta: oauth-2025-04-20`、`anthropic-version: 2023-06-01`。
-  响应 `five_hour`/`seven_day`，字段 `utilization` + `resets_at`。
-  本机 Claude 用的是**中转 token**（`sk-reclaude-`），默认 `api.anthropic.com` 会 401；
-  必须把端点指向你的中转地址（config `claude_endpoint` 或环境变量 `ANTHROPIC_BASE_URL`），且该中转需代理了这个 usage 接口。
+- **Claude 两个分支**（`fetchOnce` 按 `claudeIsRelay()` 选）：
+  - **中转站**：`~/.claude/settings.json` 的 env 有 `ANTHROPIC_BASE_URL` 且 `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN` 任一非空 →
+    `fetchClaudeRelay`（与 codex 共用 sub2api/new-api 逻辑，取「已用 + 余额」转 `money` 帧）。
+    Claude 的 base_url 是 Anthropic 风格、通常不带 /v1，而余额接口挂在 /v1 根下，故按 `relayBaseCandidates` 先试 `<base>/v1` 再试原始 base。
+    若 base_url 是本机回环代理（cc-switch 本地代理模式，token 为 `PROXY_xxx`），代理不转发余额接口（404），
+    须由 `ccswitch.go` 从 `~/.cc-switch/cc-switch.db`（mattn/go-sqlite3；providers 表 `app_type='claude' AND is_current=1` 的 `settings_config.env`）回溯真实上游。
+  - **官方/网关 token**（无上述 env）：token 在 `~/.claude/.credentials.json` → `claudeAiOauth.accessToken`；
+    `GET <base>/api/oauth/usage`，头还要 `anthropic-beta: oauth-2025-04-20`、`anthropic-version: 2023-06-01`。
+    响应 `five_hour`/`seven_day`，字段 `utilization` + `resets_at`。
+    中转 token（`sk-reclaude-` 一类）默认 `api.anthropic.com` 会 401；
+    必须把端点指向中转地址（config `claude_endpoint` 或环境变量 `ANTHROPIC_BASE_URL`），且该中转需代理了这个 usage 接口。
 - 数值格式可能因环境而异：`fetchClaude`/`fetchCodex` 的 `debug` 参数现固定传 `false`（旧 `--debug` 已随 CLI 移除）；
   排错看界面「活动日志」里的 `HTTP 4xx` 等错误，或临时把 `engine.go:fetchOnce` 里的 `false` 改成 `true` 打原始响应。
   `fetchCodex`/`fetchClaude` 均返回 `(Provider, error)`；某边失败时该 provider `ok:false`，不影响另一边。
@@ -111,7 +118,7 @@ pio device monitor                    # 看串口日志
 - **C3/S3 原生 USB-CDC**：一根 USB 线既供电又当串口；`platformio.ini` 用 `-DARDUINO_USB_CDC_ON_BOOT=1`。
 - **OLED 引脚**：`platformio.ini` 的 `-DPIN_SDA/-DPIN_SCL`（默认 8/9），I2C 地址默认 `0x3C`。
 - **改完必须验证**：host 改动跑 `set CGO_ENABLED=1 && go build -ldflags "-H=windowsgui" ./... && go vet ./...`；固件改动跑 `pio run -e esp32-c3`（已配置可用）。
-- 配置键：`port baud interval_seconds retry_interval_seconds page_interval_seconds provider proxy claude_endpoint codex_endpoint codex_mode codex_relay_types autostart`（见 `config.example.json`；实际存 `~/.esp32-ai-usage/config.json`）。`page_interval_seconds` 是 all 模式轮播翻页间隔（默认 4，秒）。`provider` 取值 `all`/`codex`/`claude`（默认 codex；旧值 both 归一成 all）。`codex_relay_types` 是 `{主机名:类型}` 映射（旧的 `codex_relay_type`/`codex_relay_base_url` 已移除）；设置页展示为两列列表（域名|类型下拉 auto/sub2api/new-api），域名自动检测（`detectRelayHosts`：仅 codex 走 sk- key 中转时读 config.toml base_url；claude 端点是 OAuth 网关不算中转站），已保存类型的旧域名换站后仍保留行，选 auto 即从映射删除；watcher 检测到凭据变动时经 `Engine.OnCredsChange`→`g.refreshRelayRows` 自动重建列表（合并未保存选择）。设置页顶部只放「立即刷新使用量」（调 `engine.Reload()`）、监控对象（provider）、开机启动、中转站类型，其余项折叠在「更多」下（普通按钮切换 Show/Hide，展开/收起时 `fitWindowHeight` 直接调窗口高度，设置页不用滚动容器），保存是独立按钮（不再用 Form.OnSubmit）。`codex_mode` 界面已无设置项，仅手改配置文件生效（保存时透传旧值）。`autostart` 默认 false，需用户手动勾选。
+- 配置键：`port baud interval_seconds retry_interval_seconds page_interval_seconds provider proxy claude_endpoint codex_endpoint codex_mode codex_relay_types autostart`（见 `config.example.json`；实际存 `~/.esp32-ai-usage/config.json`）。`page_interval_seconds` 是 all 模式轮播翻页间隔（默认 4，秒）。`provider` 取值 `all`/`codex`/`claude`（默认 codex；旧值 both 归一成 all）。`codex_relay_types` 是 `{主机名:类型}` 映射（旧的 `codex_relay_type`/`codex_relay_base_url` 已移除）；设置页展示为两列列表（域名|类型下拉 auto/sub2api/new-api），域名自动检测（`detectRelayHosts`：codex 走 sk- key 中转时读 config.toml base_url；claude 走中转时读 settings.json env 的 ANTHROPIC_BASE_URL，回环代理经 cc-switch 回溯），已保存类型的旧域名换站后仍保留行，选 auto 即从映射删除；watcher 检测到凭据变动时经 `Engine.OnCredsChange`→`g.refreshRelayRows` 自动重建列表（合并未保存选择）。设置页顶部只放「立即刷新使用量」（调 `engine.Reload()`）、监控对象（provider）、开机启动、中转站类型，其余项折叠在「更多」下（普通按钮切换 Show/Hide，展开/收起时 `fitWindowHeight` 直接调窗口高度，设置页不用滚动容器），保存是独立按钮（不再用 Form.OnSubmit）。`codex_mode` 界面已无设置项，仅手改配置文件生效（保存时透传旧值）。`autostart` 默认 false，需用户手动勾选。
 - 取数间隔自适应：`interval_seconds`（默认 300，成功后用）与 `retry_interval_seconds`（默认 60，失败时用）。启动立即取一次，`fetchOnce` 返回是否成功（任一 provider 取到数据即成功），`fetchLoop` 据此选下次间隔。
 
 ## 易踩的点（GUI 架构）

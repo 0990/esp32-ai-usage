@@ -6,6 +6,7 @@ require (
 	fyne.io/fyne/v2 v2.7.4
 	github.com/BurntSushi/toml v1.5.0
 	github.com/fsnotify/fsnotify v1.9.0
+	github.com/mattn/go-sqlite3 v1.14.32
 	go.bug.st/serial v1.7.1
 	golang.org/x/sys v0.43.0
 )
