@@ -1,4 +1,4 @@
-# 发布 GitHub Release 时自动构建 Windows exe 并上传为 Release 资产。
+# 推送 tag 时自动创建 Draft Release，构建 Windows exe 并上传为 Release 资产。
 #
 # 本项目是 Fyne 桌面程序，需要 CGO + C 编译器（windows-latest 自带 MinGW-w64 gcc），
 # 故在 Windows runner 上原生构建（CGO 交叉编译 Fyne 很麻烦）。程序本身也是 Windows 专用
@@ -6,8 +6,9 @@
 name: Build Windows Release
 
 on:
-  release:
-    types: [created]
+  push:
+    tags:
+      - "**"
 
 permissions:
   contents: write # 需要写权限把 exe 附加到 Release
@@ -36,7 +37,11 @@ jobs:
           CGO_ENABLED: 1
         run: go build -ldflags "-s -w -H=windowsgui" -o "bin/esp32-ai-usage-${{ github.ref_name }}.exe" .
 
-      - name: Attach exe to Release
+      - name: Create draft release and attach exe
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: true
+          generate_release_notes: true
           files: host/bin/esp32-ai-usage-${{ github.ref_name }}.exe
