@@ -57,6 +57,9 @@ static const unsigned char ICON_KIMI[] U8X8_PROGMEM = {
 // host 已不再发心跳频率信息；超过这么久没收到新行就本地兜底标 stale。
 static const uint32_t STALE_MS = 90000;
 
+// Frame.a 的取值（与 host 的 Act* 一致）。
+static const int ActIdle_ = 0, ActBusy_ = 1, ActAttention_ = 2;
+
 // 一帧 = 一整屏。kind 决定怎么渲染。
 struct Frame {
   char ic[10] = "";     // pct: "claude"/"codex"/"kimi"；money: 货币符号（画在硬币上）
@@ -70,6 +73,7 @@ struct Frame {
   char v1[16] = "";     // money: 金额文本
   char v2[16] = "";
   bool old    = false;  // 数据过期
+  int  a      = 0;      // 工作状态：0=空闲 1=工作中（跑动的点） 2=需要你（图标闪烁）
   bool valid  = false;  // 是否收到过有效帧
 };
 
@@ -112,6 +116,7 @@ void parseLine(const String &line) {
   strlcpy(f.v1, doc["v1"] | "", sizeof(f.v1));
   strlcpy(f.v2, doc["v2"] | "", sizeof(f.v2));
   f.old   = doc["old"] | false;
+  f.a     = doc["a"] | 0;
   f.valid = true;
 
   frame = f;
@@ -172,6 +177,27 @@ void drawMoneyRow(int yTop, int xL, int xR, const char *label, const char *val) 
   u8g2.drawStr(xR - vw, yTop + 13, v);
 }
 
+// 工作状态标志，叠加在左侧图标区（x 0..23）：
+//   a=1 工作中：底部一排 3 个点轮流点亮（各 provider 图标底部 y>=25 都是空的，不会压到图标）；
+//   a=2 需要你：整个图标区每 500ms 反色一次（XOR），等待授权时很显眼。
+// 在 clearBuffer 之后、sendBuffer 之前调用。
+void drawActivity(int a) {
+  if (a == ActBusy_) {
+    int phase = (millis() / 300) % 3;
+    for (int i = 0; i < 3; i++) {
+      int x = 5 + i * 6;
+      if (i == phase) u8g2.drawDisc(x, 29, 2);
+      else            u8g2.drawPixel(x, 29);
+    }
+  } else if (a == ActAttention_) {
+    if ((millis() / 500) % 2 == 0) {
+      u8g2.setDrawColor(2);  // XOR
+      u8g2.drawBox(0, 0, ICON_W, 32);
+      u8g2.setDrawColor(1);
+    }
+  }
+}
+
 // pct 帧：左侧 provider 图标 + 两行百分比。
 void drawPctFrame(const Frame &f, bool stale) {
   u8g2.clearBuffer();
@@ -189,6 +215,7 @@ void drawPctFrame(const Frame &f, bool stale) {
     u8g2.setFont(u8g2_font_5x7_tr);
     u8g2.drawStr(xL + 34, 15, "old");
   }
+  drawActivity(f.a);
   u8g2.sendBuffer();
 }
 
@@ -213,6 +240,7 @@ void drawMoneyFrame(const Frame &f, bool stale) {
     u8g2.setFont(u8g2_font_5x7_tr);
     u8g2.drawStr(xR - u8g2.getStrWidth("old"), 7, "old");
   }
+  drawActivity(f.a);
   u8g2.sendBuffer();
 }
 
@@ -228,9 +256,10 @@ void drawWaiting() {
 }
 
 // ---- 板载 RGB 状态灯（PIN_RGB 上的 WS2812，用核心自带 neopixelWrite 驱动）----
-// 蓝=数据正常，红=数据异常(ERR)，黄=数据过期(old)，红闪=等待电脑。
+// 蓝=数据正常，红=数据异常(ERR)，黄=数据过期(old)，红闪=等待电脑，
+// 蓝呼吸=CLI 工作中，紫闪=CLI 在等你授权。
 // 亮度压低避免刺眼；底层按「实际写入色」去重，减少无谓的 bit-bang。
-enum LedState { LED_WAIT, LED_OK, LED_ERR, LED_OLD };
+enum LedState { LED_WAIT, LED_OK, LED_ERR, LED_OLD, LED_BUSY, LED_ATTN };
 
 // 只有目标色和上次写入的不同才真正驱动灯珠。
 void writeLed(uint8_t r, uint8_t g, uint8_t b) {
@@ -248,6 +277,17 @@ void setLed(LedState s) {
     case LED_OLD:  writeLed(48, 28, 0);  break;  // 黄
     case LED_WAIT:                               // 等待电脑：红灯闪烁（~2Hz）
       if ((millis() / 500) % 2 == 0) writeLed(48, 0, 0);
+      else                           writeLed(0,  0, 0);
+      break;
+    case LED_BUSY: {                             // 工作中：蓝色呼吸（2s 一个来回）
+      uint32_t t = millis() % 2000;
+      uint32_t k = t < 1000 ? t : 2000 - t;      // 0..1000..0
+      k = 100 + k * 900 / 1000;                  // 保底亮度，别完全熄灭
+      writeLed(0, 14 * k / 1000, 30 * k / 1000);
+      break;
+    }
+    case LED_ATTN:                               // 需要你：紫色闪烁（~2Hz）
+      if ((millis() / 250) % 2 == 0) writeLed(40, 0, 40);
       else                           writeLed(0,  0, 0);
       break;
   }
@@ -276,19 +316,24 @@ void loop() {
   // host 会自带 old 标记；这里再加一道本地兜底（host 长时间不发就标过期）。
   bool stale = frame.old || (lastUpdateMs != 0 && now - lastUpdateMs > STALE_MS);
 
-  // 状态灯：等待→暗蓝，过期→黄，异常→红，正常→绿（过期优先于异常）。
+  // 状态灯：等待→红闪，需要你→紫闪，过期→黄，异常→红，工作中→蓝呼吸，正常→蓝。
   if (lastUpdateMs == 0 || !frame.valid) {
     setLed(LED_WAIT);
+  } else if (frame.a == ActAttention_) {
+    setLed(LED_ATTN);
   } else if (stale) {
     setLed(LED_OLD);
   } else if (frameHasError(frame)) {
     setLed(LED_ERR);
+  } else if (frame.a == ActBusy_) {
+    setLed(LED_BUSY);
   } else {
     setLed(LED_OK);
   }
 
-  // 数据有变化时重画；另外每秒强制刷新一次以更新 stale 标记。
-  if (dirty || now - lastDraw > 1000) {
+  // 数据有变化时重画；另外每秒强制刷新一次以更新 stale 标记；有工作状态动画时 150ms 一帧。
+  uint32_t redrawMs = (frame.valid && frame.a != ActIdle_) ? 150 : 1000;
+  if (dirty || now - lastDraw > redrawMs) {
     if (lastUpdateMs == 0 || !frame.valid) {
       drawWaiting();
     } else if (strcmp(frame.k, "money") == 0) {

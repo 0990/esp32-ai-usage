@@ -46,6 +46,9 @@ type Frame struct {
 	V1   string `json:"v1,omitempty"`  // money: 第 1 行金额文本
 	V2   string `json:"v2,omitempty"`  // money: 第 2 行金额文本
 	Old  bool   `json:"old,omitempty"` // 数据过期 → 固件叠加 "old"
+	// Act 是该页 provider 对应 CLI 的工作状态（来自 hook 回调，见 activity.go）：
+	// 0=空闲（不画）、1=工作中（固件画跑动的点）、2=需要你（固件让图标闪烁）。
+	Act int `json:"a,omitempty"`
 }
 
 func failedProvider() Provider {

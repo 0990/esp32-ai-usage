@@ -46,6 +46,20 @@ host 每发一行 JSON 就是「一整屏」(Frame)，固件收到就照着画�
 | `l1` | string | — | 第 1 行标签（最长 ~13 字符） |
 | `l2` | string | — | 第 2 行标签 |
 | `old`| bool   | `false` | 数据过期 → 固件叠加显示 `old` |
+| `a`  | int    | `0` | 该页对应 CLI 的工作状态：`0` 空闲（不画）、`1` 工作中（图标下方三个点轮流跑动，RGB 灯蓝色呼吸）、`2` 需要你（图标区每 0.5s 反色闪烁，RGB 灯紫色快闪）。见 §2.1 |
+
+### 2.1 `a` 工作状态从哪来
+
+host 往 Claude Code（`~/.claude/settings.json`）和 Codex CLI（`~/.codex/hooks.json`）安装 hook，
+两家 CLI 在「提交提示 / 回合结束 / 工具调用 / 等待授权 / 会话开始结束」时把事件 POST 到 host 的
+本地端口 `127.0.0.1:52736`（`host/activity.go`）。host 按会话记录状态、按 provider 取最高优先级
+（需要你 > 工作中 > 空闲），再随每一帧下发。`claude` 与 `reclaude` 页共用 Claude Code 的状态；`kimi` 页恒为 `0`。
+
+```json
+{"ic":"codex","k":"pct","l1":"5h","p1":94,"s1":"15:47","l2":"1w","p2":38,"s2":"06-25 14:30","a":1}
+```
+
+固件收到 `a≠0` 的帧后每 150ms 本地重画一次以驱动动画；状态变化时 host 会立刻重发当前页。
 
 ---
 

@@ -91,12 +91,17 @@ type Engine struct {
 	started       bool // 是否已完成首轮取数（用于首屏「等待」判定）
 	pageIdx       int  // all 模式当前页索引
 
+	// activity 记录 Claude Code / Codex CLI 的工作状态（由 hook 回调驱动，见 activity.go）。
+	activity *ActivityTracker
+
 	// 回调由界面设置；界面实现体须包进 fyne.Do。
 	OnLog    func(LogEntry)
 	OnStatus func(string)
 	// OnCredsChange 在 watcher 检测到 ~/.codex、~/.claude 凭据/配置变动时调用
 	// （已 debounce），供界面刷新依赖凭据的展示（如中转站域名列表）。
 	OnCredsChange func()
+	// OnActivity 在某个 provider 的工作状态聚合值变化时调用（provider: claude/codex；state 见 Act*）。
+	OnActivity func(provider string, state int)
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -105,7 +110,7 @@ type Engine struct {
 
 // NewEngine 构造引擎（尚未启动 goroutine）。
 func NewEngine(cfg Config, cfgPath string) *Engine {
-	return &Engine{
+	e := &Engine{
 		cfg:       cfg,
 		cfgPath:   cfgPath,
 		client:    newHTTPClient(cfg.Proxy),
@@ -114,6 +119,20 @@ func NewEngine(cfg Config, cfgPath string) *Engine {
 		refresh:   make(chan struct{}, 1),
 		reconnect: make(chan struct{}, 1),
 	}
+	// 工作状态变化：记日志、催显示循环立刻重画（让屏幕上的动画即时跟上）、通知界面。
+	e.activity = NewActivityTracker(func(provider string, state int) {
+		e.log(LogInfo, "activity", "%s: %s", provider, actName(state))
+		e.signalRefresh()
+		if e.OnActivity != nil {
+			e.OnActivity(provider, state)
+		}
+	})
+	return e
+}
+
+// Activity 返回某 provider 当前的工作状态（Act*）。
+func (e *Engine) Activity(provider string) int {
+	return e.activity.State(provider)
 }
 
 func (e *Engine) log(level LogLevel, tag, format string, args ...any) {
@@ -222,12 +241,23 @@ func (e *Engine) Send(line []byte) {
 // Start 启动串口管理、串口写入、取数、显示四个 goroutine，外加凭据文件监听。
 func (e *Engine) Start(ctx context.Context) {
 	e.ctx, e.cancel = context.WithCancel(ctx)
-	e.wg.Add(4)
+	e.loadCache() // 先把上次的数据装回来，首轮取数失败也有东西可显示
+	e.wg.Add(5)
 	go e.serialManagerLoop()
 	go e.serialWriterLoop()
 	go e.fetchLoop()
 	go e.displayLoop()
+	go e.activityLoop()
 	go watchCredentials(e.ctx, e) // 监听 ~/.codex、~/.claude 变动（feature 5）
+}
+
+// activityLoop 在本地端口上接收两家 CLI 的 hook 回调，直到退出。端口被占只记日志（功能降级）。
+func (e *Engine) activityLoop() {
+	defer e.wg.Done()
+	defer recoverLog("activityLoop")
+	if err := e.activity.Serve(e.ctx); err != nil {
+		e.log(LogWarn, "activity", "工作状态回调端口 %s 监听失败: %v（屏幕不会显示运行标志）", activityAddr, err)
+	}
 }
 
 // Stop 取消上下文、等待 goroutine 退出、关闭串口。可重复调用。
@@ -350,6 +380,9 @@ func (e *Engine) tryOpen(name string, baud int, logFail bool) {
 	}
 	e.setPort(p, name, fmt.Sprintf("串口: %s @ %d", name, baud))
 	e.log(LogInfo, "serial", "已连接 %s @ %d", name, baud)
+	// 串口刚连上就把当前页发过去：启动时首帧往往早于串口就绪而被丢弃，
+	// 否则要等到下一次翻页定时器（轮播间隔可能长达 60s）屏幕才会离开等待屏。
+	e.signalRefresh()
 }
 
 // fetchLoop 启动即立即取一次；之后按结果选间隔：失败用 RetryIntervalSeconds、
@@ -500,6 +533,9 @@ func (e *Engine) fetchOnce(ctx context.Context, client *http.Client, cfg Config)
 	e.started = true
 	e.dataMu.Unlock()
 	if ctx.Err() == nil {
+		if success {
+			e.saveCache() // 成功才落盘：下次启动先显示这份
+		}
 		e.signalRefresh() // 催显示循环立即重画
 	}
 	return success
@@ -575,23 +611,34 @@ func (e *Engine) buildFrames() []Frame {
 	if !e.started {
 		return nil
 	}
+	// 工作状态：claude 与 reclaude 都是 Claude Code CLI（只是 token 不同），共用 claude 的状态。
+	claudeAct := e.activity.State("claude")
+	codexAct := e.activity.State("codex")
 	var frames []Frame
 	if cfg.wants("claude") {
+		var f Frame
 		if e.claudeRelay != nil { // claude 走中转 → 中转页
-			frames = append(frames, moneyFrame(*e.claudeRelay, stale(e.claudeRelayAt)))
+			f = moneyFrame(*e.claudeRelay, stale(e.claudeRelayAt))
 		} else {
-			frames = append(frames, pctFrame("claude", e.claude, stale(e.claudeAt)))
+			f = pctFrame("claude", e.claude, stale(e.claudeAt))
 		}
+		f.Act = claudeAct
+		frames = append(frames, f)
 	}
 	if cfg.wants("reclaude") {
-		frames = append(frames, pctFrame("claude", e.reclaude, stale(e.reclaudeAt)))
+		f := pctFrame("claude", e.reclaude, stale(e.reclaudeAt))
+		f.Act = claudeAct
+		frames = append(frames, f)
 	}
 	if cfg.wants("codex") {
+		var f Frame
 		if e.relay != nil { // codex 走中转 → 中转页
-			frames = append(frames, moneyFrame(*e.relay, stale(e.relayAt)))
+			f = moneyFrame(*e.relay, stale(e.relayAt))
 		} else {
-			frames = append(frames, pctFrame("codex", e.codex, stale(e.codexAt)))
+			f = pctFrame("codex", e.codex, stale(e.codexAt))
 		}
+		f.Act = codexAct
+		frames = append(frames, f)
 	}
 	if cfg.wants("kimi") {
 		frames = append(frames, pctFrame("kimi", e.kimi, stale(e.kimiAt)))

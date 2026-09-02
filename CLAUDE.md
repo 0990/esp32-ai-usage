@@ -25,6 +25,9 @@ host/                     # Go 程序（Fyne 桌面 GUI，module: github.com/loc
   engine.go               # 后台引擎：取数循环 fetchLoop/fetchOnce(更新缓存)、显示循环 displayLoop(按页轮播下发)、单点写串口 serialWriterLoop、串口管理 serialManagerLoop(断线重连)、Reload()
   gui.go                  # Fyne 界面：三个 Tab（设置/测试命令/活动日志）+ 底部串口状态 + 系统托盘
   singleinstance.go       # 单实例：本地回环端口当锁兼 IPC；后启动实例唤起已有窗口后退出
+  activity.go             # 「工作状态」：本地 HTTP(127.0.0.1:52736) 接收 Claude Code/Codex 的 hook 回调，按会话记状态、按 provider 聚合成 Frame.Act
+  hooks.go                # 往 ~/.claude/settings.json(http hook) 与 ~/.codex/hooks.json(curl 命令 hook) 安装/移除指向 activityAddr 的钩子
+  activity_test.go        # 状态机 / HTTP handler / hook 文件合并 / curl 命令端到端 的测试（go test ./...）
   watcher.go              # fsnotify 监听 ~/.codex、~/.claude 变动 → 催 Reload() 立即刷新
   autostart_windows.go    # 开机启动：写 HKCU\...\Run 注册表项（golang.org/x/sys/windows/registry）
   autostart_other.go      # 非 Windows 的 setAutostart 空实现（//go:build !windows）
@@ -76,6 +79,7 @@ pio device monitor                    # 看串口日志
 
 - `k`=`pct`：百分比页（claude/codex）。`p1/p2`=剩余百分比(`-1`→`ERR`)，`s1/s2`=重置时间。
 - `k`=`money`：中转站金额页。`v1/v2`=已格式化金额文本（含货币符号），`ic`=货币符号（画在硬币上）。
+- `a`（可选）：该页 CLI 的工作状态 0 空闲/1 工作中/2 需要你（等授权）。固件 `drawActivity`：1 画图标下方跑动的三个点，2 让图标区 XOR 闪烁；RGB 灯 1 蓝呼吸、2 紫闪。`a≠0` 时固件 150ms 重画一次驱动动画。
 - 改协议时**两端要一起改**：`common.go` 的 `Frame`（+ `pctFrame`/`moneyFrame` 构造）与 `firmware/src/main.cpp` 的 `parseLine`/`drawPctFrame`/`drawMoneyFrame`。
 
 ## 取数关键事实（重新发现成本高，改前先看）
@@ -126,6 +130,7 @@ pio device monitor                    # 看串口日志
 
 - **配置路径**：固定 `~/.esp32-ai-usage/config.json`（`defaultConfigPath`）；首次运行（文件不存在）才写默认配置并 `setAutostart(false)`（开机启动默认关）。`loadConfig` 先 `defaultConfig()` 再 `Unmarshal`（JSON 缺键时保持默认值，别改成先零值后 Unmarshal）。
 - **保存即应用**：设置页保存走 `engine.UpdateConfig(cfg)`（整套配置入内存+重建 http client+写盘+催 reload）；`autostart` 另调 `setAutostart`；仅当 port/baud 变化才调 `engine.ReconnectSerial()` 重连。没有「逐字段即时生效」。
+- **串口连上即重发**：`tryOpen` 成功后 `signalRefresh()`。启动时首轮取数/缓存装载往往早于串口就绪（打开后还等 2s），首帧会被丢弃；不重发的话要等下一次翻页定时器（轮播间隔可配到 60s）屏幕才离开 `Waiting for PC`。
 - **串口热插拔**：`serialManagerLoop` 每 3s 用 `desiredPort` 算目标串口并与当前口比对——当前口消失（拔掉）或出现更优目标就断开重选，未连接且目标存在就打开；写串口失败也会立即触发重查（覆盖同 COM 号快速拔插、句柄失效的情况）。AUTO 模式的「单口兜底」只认 USB 串口，绝不选主板自带 COM1（写它不报错、会一直占住）。
 - **UI 线程**：引擎 goroutine 回写界面必须包 `fyne.Do(...)`（见 `gui.go` 的 `OnLog`/`OnStatus`）；按钮/表单回调本就在 UI 线程，调引擎方法即可。
 - **串口写入单点化**：只有 `engine.go` 的 `serialWriterLoop` 执行 `port.Write`；显示循环与「发送测试 Frame」都往 `writeCh` 投递，勿在别处直接写串口。
@@ -133,5 +138,21 @@ pio device monitor                    # 看串口日志
 - **取数间隔自适应**：`fetchOnce` 返回 bool（任一 provider 成功即 true）；`fetchLoop` 失败用 `RetryIntervalSeconds`、成功用 `IntervalSeconds`。启动即取一次，因此「失败 60s 重试、首次成功后 300s」是 result-based 实现（后续再失败也会回落到重试间隔）。
 - **provider 取数分支**：`fetchOnce`/`buildFrames` 用 `cfg.wants("xxx")` 判断（`provider` 支持逗号分隔多选，如 `codex,kimi`；`all`/旧值 both 由 `parseProviders` 归一成全选，默认 codex）；codex 走中转时设 `e.relay`，官方时清 `e.relay=nil`（避免残留中转页）；`buildFrames` 据 `e.relay!=nil` 决定 codex 槽位画 `money` 还是 `pct`。
 - **单实例**：`main()` 先 `acquireSingleInstance()`（占本地回环端口）；占用失败说明已有实例，敲门让其 `w.Show()` 后本进程退出。
-- **文件监听**：`watchCredentials` 用 fsnotify 看 `~/.codex`、`~/.claude` 目录，命中 `auth.json/config.toml/.credentials.json` 变动（debounce 800ms）就 `Reload()` 立即重取。
+- **文件监听**：`watchCredentials` 用 fsnotify 看 `~/.codex`、`~/.claude`、`~/.kimi-code/credentials`、`~/.reclaude` 目录，命中 `auth.json/config.toml/.credentials.json/settings.json/kimi-code.json/state.json/ca.pem` 变动（debounce 800ms）就 `Reload()` 立即重取。
+  **只认内容真变了**：debounce 到期时按 `fileFingerprint` 重算指纹（`state.json` 只看 daemon port/running；其它文件 sha256），没变不触发。
+  背景：ReClaude daemon 每分钟重写 `~/.reclaude/state.json` 的 `last_alive_at_ms` 心跳，以前每次都触发 Reload，取数变成每分钟一次，把 ReClaude 网关打到 HTTP 429（成功/失败交替）。
+- **取数结果落盘**：`cache.go` 每次成功取数后把缓存写到 `~/.esp32-ai-usage/cache.json`（只有百分比/时间/金额，无凭据）；`Start()` 先 `loadCache()` 装回并置 `started=true`，
+  启动即显示上次数据（按时间戳超期自动标 `old`），首轮取数失败时不再先 ERR 一阵。
 - **退出**：`fetchCodex/fetchClaude` 已绑 ctx，退出 `cancel()` 后 in-flight 请求立即中止，不会卡 `Stop()`。
+- **工作状态（运行标志）**：不是猜进程/看文件 mtime，而是两家 CLI 自带的 hook。`hooks.go` 把回调写进
+  `~/.claude/settings.json`（`type:http`，POST 到 `http://127.0.0.1:52736/hook/claude`，同步、秒回）和
+  `~/.codex/hooks.json`（`type:command`，`curl -s -m 2 -X POST --data-binary @- .../hook/codex`，`async:true`；Codex 不支持 http 型，
+  且**新钩子要用户在 Codex 里 `/hooks` 信任一次**才执行）。事件：SessionStart/SessionEnd/UserPromptSubmit/Stop/PreToolUse/PostToolUse，
+  外加 Claude 的 Notification（按 `notification_type`：permission_prompt 等→需要你，idle_prompt→空闲）与 Codex 的 PermissionRequest（→需要你）。
+  `activity.go` 的 `eventState` 是事件→状态映射；按 `(provider, session_id)` 记录，聚合取最高优先级（需要你>工作中>空闲）；
+  进程被直接杀掉不会发 Stop，靠 TTL 兜底（busy 15min、attention 2h）。SessionStart 只登记不覆盖（compact/resume 也会发它）。
+  聚合值变化 → `Engine.activity` 的 onChange → 记日志 + `signalRefresh()` 立刻重发当前页 + `OnActivity` 更新底部状态栏。
+  `buildFrames` 把 claude 状态同时给 claude/reclaude 页（同一个 Claude Code CLI），codex 给 codex 页，kimi 恒 0。
+  安装/移除只增删「handler 的 url/command 含 activityAddr」的条目，别人的钩子与其它设置键原样保留（`updateHookFile` 幂等）。
+  服务端对任何请求都回 200 + `{}`（Codex 的 Stop hook 要求 stdout 是 JSON；非法 body 也回 200，别让 CLI 报错）。
+  hook 事件 JSON 里有 prompt/工具输入，只解析 `session_id/hook_event_name/notification_type`，绝不记录其它内容。

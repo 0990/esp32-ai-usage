@@ -38,6 +38,8 @@ type GUI struct {
 	logLabel  *widget.Label
 	logScroll *container.Scroll
 	status    *widget.Label // 常驻底部的串口状态
+	actLabel  *widget.Label  // 常驻底部右侧：Claude / Codex 的工作状态
+	actState  map[string]int // provider -> Act*（OnActivity 回调更新）
 
 	// refreshRelayRows 重建设置页的「中转站类型」域名列表（buildSettingsTab 里赋值）。
 	// 凭据/配置变动时由 OnCredsChange 触发；须在 UI 线程调用。
@@ -52,11 +54,12 @@ func RunGUI(cfg Config, cfgPath string, ln net.Listener) {
 	a.SetIcon(icon)
 
 	w := a.NewWindow("ESP32 AI 额度表")
-	g := &GUI{app: a, win: w, engine: NewEngine(cfg, cfgPath)}
+	g := &GUI{app: a, win: w, engine: NewEngine(cfg, cfgPath), actState: map[string]int{}}
 
 	// 引擎回调 → UI：一律包进 fyne.Do（Fyne 要求 UI 改动在 UI goroutine）。
 	g.engine.OnLog = func(e LogEntry) { fyne.Do(func() { g.appendLog(e) }) }
 	g.engine.OnStatus = func(s string) { fyne.Do(func() { g.status.SetText(s) }) }
+	g.engine.OnActivity = func(p string, s int) { fyne.Do(func() { g.setActivity(p, s) }) }
 	// 凭据/配置变动（如切换中转站）→ 自动刷新设置页的中转站域名列表。
 	g.engine.OnCredsChange = func() {
 		fyne.Do(func() {
@@ -103,6 +106,8 @@ func (g *GUI) buildUI() fyne.CanvasObject {
 	g.logLabel.TextStyle = fyne.TextStyle{Monospace: true}
 	g.logScroll = container.NewVScroll(g.logLabel)
 	g.status = widget.NewLabel("串口: 未连接")
+	g.actLabel = widget.NewLabel("")
+	g.setActivity("", 0) // 初始文案
 
 	tabs := container.NewAppTabs(
 		container.NewTabItem("设置", g.buildSettingsTab()),
@@ -111,7 +116,17 @@ func (g *GUI) buildUI() fyne.CanvasObject {
 	)
 	tabs.SetTabLocation(container.TabLocationTop)
 
-	return container.NewBorder(nil, g.status, nil, nil, tabs)
+	bottom := container.NewBorder(nil, nil, g.status, g.actLabel)
+	return container.NewBorder(nil, bottom, nil, nil, tabs)
+}
+
+// setActivity 更新底部右侧的工作状态文案。provider 为空只重绘。须在 UI 线程调用。
+func (g *GUI) setActivity(provider string, state int) {
+	if provider != "" {
+		g.actState[provider] = state
+	}
+	g.actLabel.SetText(fmt.Sprintf("Claude: %s · Codex: %s",
+		actName(g.actState["claude"]), actName(g.actState["codex"])))
 }
 
 // buildTestTab：自定义 JSON 输入框 + 发送按钮。
@@ -234,9 +249,38 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 		g.engine.Reload()
 	})
 
+	// 工作状态钩子：往 Claude Code / Codex 的 hook 配置里写回调，让屏幕显示「正在运行」标志。
+	hooksStatus := widget.NewLabel(activityHooksStatus())
+	installHooksBtn := widget.NewButton("安装", func() {
+		if err := installActivityHooks(); err != nil {
+			g.engine.log(LogError, "activity", "安装钩子失败: %v", err)
+			dialog.ShowError(err, g.win)
+		} else {
+			g.engine.log(LogInfo, "activity", "已安装工作状态钩子（Claude: %s；Codex: %s）", claudeSettingsPath(), codexHooksPath())
+			dialog.ShowInformation("钩子已安装",
+				"已写入：\n"+
+					"  "+claudeSettingsPath()+"\n    Claude Code：新开的会话立即生效。\n"+
+					"  "+codexHooksPath()+"\n    Codex：需在 Codex 里输入 /hooks 审核并信任新钩子，否则不会执行。\n\n"+
+					"之后 CLI 工作时屏幕左下角会显示跑动的点，等你授权时图标闪烁。",
+				g.win)
+		}
+		hooksStatus.SetText(activityHooksStatus())
+	})
+	removeHooksBtn := widget.NewButton("移除", func() {
+		if err := removeActivityHooks(); err != nil {
+			g.engine.log(LogError, "activity", "移除钩子失败: %v", err)
+			dialog.ShowError(err, g.win)
+		} else {
+			g.engine.log(LogInfo, "activity", "已移除工作状态钩子")
+		}
+		hooksStatus.SetText(activityHooksStatus())
+	})
+	hooksRow := container.NewHBox(hooksStatus, installHooksBtn, removeHooksBtn)
+
 	topForm := widget.NewForm(
 		widget.NewFormItem("监控对象", providerChecks),
 		widget.NewFormItem("开机启动", autostartCheck),
+		widget.NewFormItem("运行标志钩子", hooksRow),
 		widget.NewFormItem("中转站类型", relayList),
 	)
 	moreForm := widget.NewForm(
