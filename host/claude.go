@@ -129,6 +129,10 @@ func fetchClaude(ctx context.Context, client *http.Client, endpoint string, debu
 	if err != nil {
 		return failedProvider(), err
 	}
+	return fetchClaudeToken(ctx, client, endpoint, debug, token)
+}
+
+func fetchClaudeToken(ctx context.Context, client *http.Client, endpoint string, debug bool, token string) (Provider, error) {
 	endpoint = resolveClaudeEndpoint(endpoint)
 
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)

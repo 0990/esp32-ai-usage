@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -22,6 +23,13 @@ func watchCredentials(ctx context.Context, e *Engine) {
 	defer w.Close()
 
 	dirs := []string{codexHome(), expandHome("~/.claude"), filepath.Join(kimiHome(), "credentials")}
+	// ReClaude's daemon port is written to state.json when it starts/restarts.
+	// Only add the directory when installed so normal users do not get a noisy
+	// "directory not found" warning.
+	reclaudeDir := reclaudeHome()
+	if info, err := os.Stat(reclaudeDir); err == nil && info.IsDir() {
+		dirs = append(dirs, reclaudeDir)
+	}
 	watched := 0
 	for _, d := range dirs {
 		if err := w.Add(d); err != nil {
@@ -33,13 +41,13 @@ func watchCredentials(ctx context.Context, e *Engine) {
 	if watched == 0 {
 		return
 	}
-	e.log(LogInfo, "watch", "已监听凭据目录变动（~/.codex、~/.claude、~/.kimi-code/credentials）")
+	e.log(LogInfo, "watch", "已监听凭据目录变动（~/.codex、~/.claude、~/.kimi-code/credentials、~/.reclaude）")
 
 	// 关心的文件名（不区分大小写）：变动这些才触发刷新。
 	interesting := func(p string) bool {
 		name := strings.ToLower(filepath.Base(p))
 		switch name {
-		case "auth.json", "config.toml", ".credentials.json", "settings.json", "kimi-code.json":
+		case "auth.json", "config.toml", ".credentials.json", "settings.json", "kimi-code.json", "state.json", "ca.pem":
 			return true
 		}
 		return false

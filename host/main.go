@@ -25,15 +25,15 @@ type Config struct {
 	IntervalSeconds int    `json:"interval_seconds"` // 取数成功后的正常轮询间隔，默认 300
 	// RetryIntervalSeconds 是取数失败时的重试间隔，默认 60。
 	// 启动先立即取一次：失败按此间隔重试，首次成功后改用 IntervalSeconds。
-	RetryIntervalSeconds int    `json:"retry_interval_seconds"`
+	RetryIntervalSeconds int `json:"retry_interval_seconds"`
 	// PageIntervalSeconds 是 all 模式下轮播翻页的间隔（秒），默认 4。
 	PageIntervalSeconds int    `json:"page_interval_seconds"`
-	Provider            string `json:"provider"`        // 监控对象："all" 或逗号分隔子集（如 "codex,kimi"），默认 codex；旧值 both 等同 all
-	Proxy                string `json:"proxy"`           // 显式代理；留空则用 HTTPS_PROXY 环境变量
-	ClaudeEndPoint       string `json:"claude_endpoint"` // 留空则用 ANTHROPIC_BASE_URL 或默认
-	CodexEndpoint        string `json:"codex_endpoint"`  // 官方订阅的 wham/usage，留空用默认
-	KimiEndpoint         string `json:"kimi_endpoint"`   // Kimi 订阅的 /coding/v1/usages，留空用默认
-	Autostart            bool   `json:"autostart"`       // 开机启动，默认 false（需用户在设置里手动开启）
+	Provider            string `json:"provider"`        // 监控对象："all" 或逗号分隔子集（如 "codex,reclaude,kimi"），默认 codex；旧值 both 等同 all
+	Proxy               string `json:"proxy"`           // 显式代理；留空则用 HTTPS_PROXY 环境变量
+	ClaudeEndPoint      string `json:"claude_endpoint"` // 留空则用 ANTHROPIC_BASE_URL 或默认
+	CodexEndpoint       string `json:"codex_endpoint"`  // 官方订阅的 wham/usage，留空用默认
+	KimiEndpoint        string `json:"kimi_endpoint"`   // Kimi 订阅的 /coding/v1/usages，留空用默认
+	Autostart           bool   `json:"autostart"`       // 开机启动，默认 false（需用户在设置里手动开启）
 
 	// Codex 取数模式：官方订阅取百分比额度，中转站取余额（relay）。
 	// 界面上已无此设置项，仅供手改配置文件强制覆盖。
@@ -58,9 +58,9 @@ func defaultConfigPath() string {
 }
 
 // providerOrder 是监控对象的固定顺序（界面勾选框与存储串都按此序）。
-var providerOrder = []string{"codex", "claude", "kimi"}
+var providerOrder = []string{"codex", "claude", "reclaude", "kimi"}
 
-// parseProviders 把配置值解析成监控对象集合：支持逗号分隔多选（如 "codex,kimi"）；
+// parseProviders 把配置值解析成监控对象集合：支持逗号分隔多选（如 "codex,reclaude,kimi"）；
 // "all"/"both" 等同全选；空或全部非法时回退默认 {codex}。
 func parseProviders(s string) map[string]bool {
 	set := map[string]bool{}
@@ -70,7 +70,7 @@ func parseProviders(s string) map[string]bool {
 			for _, p := range providerOrder {
 				set[p] = true
 			}
-		case "codex", "claude", "kimi":
+		case "codex", "claude", "reclaude", "kimi":
 			set[strings.ToLower(strings.TrimSpace(tok))] = true
 		}
 	}

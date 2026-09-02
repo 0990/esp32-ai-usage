@@ -77,11 +77,13 @@ type Engine struct {
 	// 取数结果缓存（供显示循环按页渲染），由 dataMu 保护。
 	dataMu        sync.Mutex
 	claude        Provider  // 官方百分比额度
+	reclaude      Provider  // ReClaude 百分比额度（经本机 daemon）
 	codex         Provider  // 官方百分比额度
 	kimi          Provider  // 官方百分比额度
 	relay         *Relay    // 中转站余额（codex 走中转时）；nil=非中转
 	claudeRelay   *Relay    // 中转站余额（claude 走中转时）；nil=非中转
 	claudeAt      time.Time // 最近一次成功取数时间（用于过期判定）
+	reclaudeAt    time.Time
 	codexAt       time.Time
 	kimiAt        time.Time
 	relayAt       time.Time
@@ -104,9 +106,9 @@ type Engine struct {
 // NewEngine 构造引擎（尚未启动 goroutine）。
 func NewEngine(cfg Config, cfgPath string) *Engine {
 	return &Engine{
-		cfg:     cfg,
-		cfgPath: cfgPath,
-		client:  newHTTPClient(cfg.Proxy),
+		cfg:       cfg,
+		cfgPath:   cfgPath,
+		client:    newHTTPClient(cfg.Proxy),
 		writeCh:   make(chan []byte, 8),
 		reload:    make(chan struct{}, 1),
 		refresh:   make(chan struct{}, 1),
@@ -388,6 +390,17 @@ func (e *Engine) fetchLoop() {
 // 取数与下发解耦：实际下发由 displayLoop 按页驱动。ctx 取消（退出中）时跳过取消导致的错误日志。
 func (e *Engine) fetchOnce(ctx context.Context, client *http.Client, cfg Config) bool {
 	success := false
+	var reclaudeClient *http.Client
+	if cfg.wants("reclaude") {
+		var err error
+		reclaudeClient, err = newReclaudeHTTPClient()
+		if err != nil && ctx.Err() == nil {
+			e.log(LogError, "reclaude", "%v", err)
+		}
+		if reclaudeClient != nil {
+			defer reclaudeClient.CloseIdleConnections()
+		}
+	}
 	if cfg.wants("codex") {
 		if resolveCodexRelay(cfg) { // 中转站：取余额
 			if r, err := fetchCodexRelay(ctx, client, cfg); err != nil {
@@ -448,6 +461,23 @@ func (e *Engine) fetchOnce(ctx context.Context, client *http.Client, cfg Config)
 					p.H5.Left, p.H5.Reset, p.Wk.Left, p.Wk.Reset)
 				success = true
 			}
+		}
+	}
+	if cfg.wants("reclaude") && reclaudeClient != nil {
+		// ReClaude's daemon proxies the first-party Anthropic endpoint. Keep this
+		// independent from the configurable Claude relay endpoint above.
+		if p, err := fetchReclaude(ctx, reclaudeClient, defaultReclaudeEndpoint, false); err != nil {
+			if ctx.Err() == nil {
+				e.log(LogError, "reclaude", "%v", err)
+			}
+		} else {
+			e.dataMu.Lock()
+			e.reclaude = p
+			e.reclaudeAt = time.Now()
+			e.dataMu.Unlock()
+			e.log(LogInfo, "reclaude", "5h 剩 %d%% (复位 %s) / 周 剩 %d%% (复位 %s)",
+				p.H5.Left, p.H5.Reset, p.Wk.Left, p.Wk.Reset)
+			success = true
 		}
 	}
 	if cfg.wants("kimi") {
@@ -552,6 +582,9 @@ func (e *Engine) buildFrames() []Frame {
 		} else {
 			frames = append(frames, pctFrame("claude", e.claude, stale(e.claudeAt)))
 		}
+	}
+	if cfg.wants("reclaude") {
+		frames = append(frames, pctFrame("claude", e.reclaude, stale(e.reclaudeAt)))
 	}
 	if cfg.wants("codex") {
 		if e.relay != nil { // codex 走中转 → 中转页

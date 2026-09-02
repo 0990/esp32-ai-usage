@@ -1,9 +1,9 @@
 # esp32-ai-usage — 桌面 AI 额度小摆件
 
-一个立在桌面上的claude模型小硬件：**实时显示 Codex / Claude / Kimi / 中转站还剩多少额度**。
+一个立在桌面上的claude模型小硬件：**实时显示 Codex / Claude / ReClaude / Kimi / 中转站还剩多少额度**。
 写代码前瞄一眼，就知道这个 5 小时窗口还能不能放开用、余额还剩几块钱。
 ## 它这样工作
-Codex / Claude / Kimi 订阅：显示 5 小时和 1 周窗口的剩余百分比、恢复时间：
+Codex / Claude / ReClaude / Kimi 订阅：显示 5 小时和 1 周窗口的剩余百分比、恢复时间：
 
 ![百分比页](docs/images/eu_claude.JPEG)
 
@@ -61,6 +61,6 @@ ESP32-C3 ──I2C──> OLED 小屏（只负责显示，不联网）
 
 ## 安全提示
 
-`~/.codex/auth.json`、`~/.claude/.credentials.json`、`~/.kimi-code/credentials/kimi-code.json` 等同密码。
+`~/.codex/auth.json`、`~/.claude/.credentials.json`、`~/.reclaude/device.json`、`~/.kimi-code/credentials/kimi-code.json` 等同密码。
 本程序只在你的电脑本地读取它们、只用于调用对应的用量查询接口，不打印、不上传 token。
 请不要把这些文件（以及 `~/.esp32-ai-usage/config.json`）提交到仓库或分享给别人。

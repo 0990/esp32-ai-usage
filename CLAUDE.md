@@ -107,6 +107,7 @@ pio device monitor                    # 看串口日志
     响应 `five_hour`/`seven_day`，字段 `utilization` + `resets_at`。
     中转 token（`sk-reclaude-` 一类）默认 `api.anthropic.com` 会 401；
     必须把端点指向中转地址（config `claude_endpoint` 或环境变量 `ANTHROPIC_BASE_URL`），且该中转需代理了这个 usage 接口。
+  - **ReClaude 包装器**（监控对象 `reclaude`）：先运行 `reclaude` 启动本机 daemon；host 只读取 `~/.reclaude/device.json` 的 `sk`，从 `~/.reclaude/state.json` 读取本地代理端口，信任 `~/.reclaude/ca.pem`，经本地代理请求 `https://api.anthropic.com/api/oauth/usage`，复用上述百分比解析。
 - 数值格式可能因环境而异：`fetchClaude`/`fetchCodex` 的 `debug` 参数现固定传 `false`（旧 `--debug` 已随 CLI 移除）；
   排错看界面「活动日志」里的 `HTTP 4xx` 等错误，或临时把 `engine.go:fetchOnce` 里的 `false` 改成 `true` 打原始响应。
   `fetchCodex`/`fetchClaude` 均返回 `(Provider, error)`；某边失败时该 provider `ok:false`，不影响另一边。

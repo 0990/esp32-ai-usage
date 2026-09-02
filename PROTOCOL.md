@@ -122,11 +122,12 @@ host 每发一行 JSON 就是「一整屏」(Frame)，固件收到就照着画�
 | host 的「监控对象」 | host 轮播的页序列 |
 |----|----|
 | `claude` | 只发 Claude `pct` 页 |
+| `reclaude` | 只发 ReClaude `pct` 页（使用 Claude 图标） |
 | `codex`（官方） | 只发 Codex `pct` 页 |
 | `codex`（中转） | 只发 `money` 页 |
 | `kimi` | 只发 Kimi `pct` 页 |
-| `all`（官方 codex） | Claude `pct` → Codex `pct` → Kimi `pct`，每 ~4s 翻一页 |
-| `all`（中转 codex） | Claude `pct` → `money` → Kimi `pct`，每 ~4s 翻一页 |
+| `all`（官方 codex） | Claude `pct` → ReClaude `pct` → Codex `pct` → Kimi `pct`，每 ~4s 翻一页 |
+| `all`（中转 codex） | Claude `pct` → ReClaude `pct` → `money` → Kimi `pct`，每 ~4s 翻一页 |
 
 host 每 ~4 秒发当前页；取到新数据时也会立刻重发当前页。固件只是被动跟随。
 
