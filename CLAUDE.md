@@ -79,7 +79,7 @@ pio device monitor                    # 看串口日志
 
 - `k`=`pct`：百分比页（claude/codex）。`p1/p2`=剩余百分比(`-1`→`ERR`)，`s1/s2`=重置时间。
 - `k`=`money`：中转站金额页。`v1/v2`=已格式化金额文本（含货币符号），`ic`=货币符号（画在硬币上）。
-- `a`（可选）：该页 CLI 的工作状态 0 空闲/1 工作中/2 需要你（等授权）。固件 `drawActivity`：1 画图标下方跑动的三个点，2 让图标区 XOR 闪烁；RGB 灯 1 蓝呼吸、2 紫闪。`a≠0` 时固件 150ms 重画一次驱动动画。
+- `a`（可选）：该页 CLI 的工作状态 0 空闲/1 工作中/2 需要你（等授权）。固件 `drawActivity`：1 画图标下方跑动的三个点，2 画图标右上角脉动的「!」角标（`drawAttentionBadge`，实心/空心每 400ms 交替）；RGB 灯 1 蓝呼吸、2 紫闪。`a≠0` 时固件 150ms 重画一次驱动动画。
 - 改协议时**两端要一起改**：`common.go` 的 `Frame`（+ `pctFrame`/`moneyFrame` 构造）与 `firmware/src/main.cpp` 的 `parseLine`/`drawPctFrame`/`drawMoneyFrame`。
 
 ## 取数关键事实（重新发现成本高，改前先看）

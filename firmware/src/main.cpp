@@ -177,9 +177,29 @@ void drawMoneyRow(int yTop, int xL, int xR, const char *label, const char *val) 
   u8g2.drawStr(xR - vw, yTop + 13, v);
 }
 
+// 「需要你」角标：图标区右上角一枚 9px 圆形角标，中间一个「!」，外圈 1px 黑边把它和图标隔开
+// （像手机 App 的红点角标）。每 400ms 在「实心圆 + 镂空 !」和「空心圆环 + 实心 !」之间切换，
+// 有脉动但不再整块反色。中心 (19,4) 只压住图标右上角约 3 行像素；money 页的硬币顶在 y=7，不相交。
+void drawAttentionBadge() {
+  const int cx = 19, cy = 4, r = 4;
+  bool filled = (millis() / 400) % 2 == 0;
+  u8g2.setDrawColor(0);
+  u8g2.drawDisc(cx, cy, r + 1);            // 黑边
+  u8g2.setDrawColor(1);
+  if (filled) {
+    u8g2.drawDisc(cx, cy, r);
+    u8g2.setDrawColor(0);                  // 镂空的「!」
+  } else {
+    u8g2.drawCircle(cx, cy, r);
+  }
+  u8g2.drawVLine(cx, cy - 2, 3);           // 竖杠 3px + 空 1px + 点，正好居中在圆内
+  u8g2.drawPixel(cx, cy + 2);
+  u8g2.setDrawColor(1);
+}
+
 // 工作状态标志，叠加在左侧图标区（x 0..23）：
 //   a=1 工作中：底部一排 3 个点轮流点亮（各 provider 图标底部 y>=25 都是空的，不会压到图标）；
-//   a=2 需要你：整个图标区每 500ms 反色一次（XOR），等待授权时很显眼。
+//   a=2 需要你：右上角脉动的「!」角标（drawAttentionBadge）。
 // 在 clearBuffer 之后、sendBuffer 之前调用。
 void drawActivity(int a) {
   if (a == ActBusy_) {
@@ -190,11 +210,7 @@ void drawActivity(int a) {
       else            u8g2.drawPixel(x, 29);
     }
   } else if (a == ActAttention_) {
-    if ((millis() / 500) % 2 == 0) {
-      u8g2.setDrawColor(2);  // XOR
-      u8g2.drawBox(0, 0, ICON_W, 32);
-      u8g2.setDrawColor(1);
-    }
+    drawAttentionBadge();
   }
 }
 
