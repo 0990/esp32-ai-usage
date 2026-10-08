@@ -1,6 +1,6 @@
 package main
 
-// 当 Codex 不是官方订阅、而是中转站（auth.json 只有 OPENAI_API_KEY）时，
+// 当 Codex 不是官方订阅、而是中转站（供应商配置、环境变量或 auth.json 提供 key）时，
 // 用这个 sk- key 调中转站的余额接口，取「已用 + 总余额」(Relay)。
 // 支持两种中转站：sub2api（/v1/usage）与 new-api（OpenAI billing 仿真）。
 //   - sub2api：展示「今日用量」（Relay.Label="Today"）。
@@ -9,10 +9,12 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -21,27 +23,68 @@ import (
 
 // codexConfigToml 取 ~/.codex/config.toml 里我们需要的字段（中转站 base_url）。
 type codexConfigToml struct {
-	ModelProvider  string `toml:"model_provider"`
-	ModelProviders map[string]struct {
-		BaseURL string `toml:"base_url"`
-	} `toml:"model_providers"`
+	ModelProvider  string                        `toml:"model_provider"`
+	ModelProviders map[string]codexModelProvider `toml:"model_providers"`
+}
+
+type codexModelProvider struct {
+	BaseURL                 string `toml:"base_url"`
+	EnvKey                  string `toml:"env_key"`
+	ExperimentalBearerToken string `toml:"experimental_bearer_token"`
+	RequiresOpenAIAuth      bool   `toml:"requires_openai_auth"`
 }
 
 // loadCodexRelayBaseURL 从 config.toml 读取当前 model_provider 的 base_url（如 https://muyuan.do/v1）。
 func loadCodexRelayBaseURL() (string, error) {
+	p, err := loadCodexModelProvider()
+	return p.BaseURL, err
+}
+
+func loadCodexModelProvider() (codexModelProvider, error) {
 	path := filepath.Join(codexHome(), "config.toml")
 	var c codexConfigToml
 	if _, err := toml.DecodeFile(path, &c); err != nil {
-		return "", fmt.Errorf("读取 %s 失败: %w", path, err)
+		return codexModelProvider{}, fmt.Errorf("读取 %s 失败: %w", path, err)
 	}
 	if c.ModelProvider == "" {
-		return "", fmt.Errorf("config.toml 缺少 model_provider")
+		return codexModelProvider{}, fmt.Errorf("config.toml 缺少 model_provider")
 	}
 	p, ok := c.ModelProviders[c.ModelProvider]
+	p.BaseURL = strings.TrimSpace(p.BaseURL)
 	if !ok || p.BaseURL == "" {
-		return "", fmt.Errorf("config.toml 中 model_providers.%s.base_url 为空", c.ModelProvider)
+		return codexModelProvider{}, fmt.Errorf("config.toml 中 model_providers.%s.base_url 为空", c.ModelProvider)
 	}
-	return p.BaseURL, nil
+	return p, nil
+}
+
+// loadCodexRelaySettings 不要求 auth.json 存在：优先使用当前供应商显式配置的凭据。
+// env_key 缺失时直接报错，避免把其它供应商的 key 发到当前站点。
+func loadCodexRelaySettings() (apiKey, base string, err error) {
+	p, err := loadCodexModelProvider()
+	if err != nil {
+		return "", "", err
+	}
+	if p.EnvKey != "" {
+		key := strings.TrimSpace(os.Getenv(p.EnvKey))
+		if key == "" {
+			return "", "", fmt.Errorf("Codex 中转站配置的环境变量 %s 未设置或为空", p.EnvKey)
+		}
+		return key, p.BaseURL, nil
+	}
+	if key := strings.TrimSpace(p.ExperimentalBearerToken); key != "" {
+		return key, p.BaseURL, nil
+	}
+	a, authErr := loadCodexAuth()
+	if authErr != nil && !errors.Is(authErr, os.ErrNotExist) {
+		return "", "", authErr
+	}
+	if key := strings.TrimSpace(a.OpenAIAPIKey); key != "" {
+		return key, p.BaseURL, nil
+	}
+	if key := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); key != "" {
+		return key, p.BaseURL, nil
+	}
+	return "", "", fmt.Errorf("Codex 中转站缺少 API key：请配置供应商 env_key/experimental_bearer_token、auth.json 的 OPENAI_API_KEY 或环境变量 OPENAI_API_KEY")
 }
 
 // currencySymbol 把货币代码/符号规范成固件能渲染的短前缀（最长 3 字符，优先 ASCII）。
@@ -76,7 +119,7 @@ func relayGet(ctx context.Context, client *http.Client, url, apiKey string) ([]b
 	return body, nil
 }
 
-// resolveCodexRelay 决定 Codex 是否走中转：cfg.CodexMode 显式优先，否则看 auth.json。
+// resolveCodexRelay 决定 Codex 是否走中转：cfg.CodexMode 显式优先，否则自动检测。
 func resolveCodexRelay(cfg Config) bool {
 	switch strings.ToLower(strings.TrimSpace(cfg.CodexMode)) {
 	case "official":
@@ -115,15 +158,7 @@ func resolveCodexRelayType(cfg Config, base string) string {
 // fetchCodexRelay 取中转站「已用 + 余额」。base_url 始终来自 ~/.codex/config.toml；
 // 类型由 cfg.CodexRelayTypes（主机名→类型）决定，未配置则自动先试 sub2api 再试 new-api。
 func fetchCodexRelay(ctx context.Context, client *http.Client, cfg Config) (Relay, error) {
-	auth, err := loadCodexAuth()
-	if err != nil {
-		return Relay{}, err
-	}
-	apiKey := auth.OpenAIAPIKey
-	if apiKey == "" {
-		return Relay{}, fmt.Errorf("auth.json 无 OPENAI_API_KEY（不是中转站？）")
-	}
-	base, err := loadCodexRelayBaseURL()
+	apiKey, base, err := loadCodexRelaySettings()
 	if err != nil {
 		return Relay{}, err
 	}

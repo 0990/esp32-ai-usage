@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -58,11 +59,18 @@ func loadCodexAuth() (codexAuth, error) {
 	return a, nil
 }
 
-// codexIsRelay 根据 auth.json 判断是否为中转站（无官方 OAuth token、但有 OPENAI_API_KEY）。
+// codexIsRelay 优先识别当前供应商的独立凭据，再兼容 auth.json 的旧配置。
 func codexIsRelay() bool {
+	p, configErr := loadCodexModelProvider()
+	if configErr == nil && !p.RequiresOpenAIAuth && (p.EnvKey != "" || p.ExperimentalBearerToken != "") {
+		return true
+	}
 	a, err := loadCodexAuth()
 	if err != nil {
-		return false
+		return errors.Is(err, os.ErrNotExist) && configErr == nil && !p.RequiresOpenAIAuth
+	}
+	if a.Tokens.AccessToken == "" && configErr == nil && !p.RequiresOpenAIAuth {
+		return true
 	}
 	return a.Tokens.AccessToken == "" && a.OpenAIAPIKey != ""
 }

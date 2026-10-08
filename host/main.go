@@ -37,7 +37,7 @@ type Config struct {
 
 	// Codex 取数模式：官方订阅取百分比额度，中转站取余额（relay）。
 	// 界面上已无此设置项，仅供手改配置文件强制覆盖。
-	CodexMode string `json:"codex_mode"` // ""/auto（看 auth.json）| "official" | "relay"
+	CodexMode string `json:"codex_mode"` // ""/auto（看供应商配置及 auth.json）| "official" | "relay"
 
 	// CodexRelayTypes 是「中转站主机名 → 类型」映射（如 {"goai.im":"sub2api"}）。
 	// base_url 始终读 ~/.codex/config.toml；按其主机名查此表决定类型，未命中则自动识别。

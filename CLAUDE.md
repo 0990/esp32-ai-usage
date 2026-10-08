@@ -86,14 +86,14 @@ pio device monitor                    # 看串口日志
 
 - **没有可脚本化的 `codex status` / `claude usage` 命令**——它们只是 TUI 内的 `/status`、`/usage` 面板。
   所以本项目走「读本地 token + 调内部 usage API」，**不要**去尝试解析 TUI 输出。
-- **Codex 分两种**（`codexIsRelay` 看 auth.json 自动判定，可用 `codex_mode` 强制）：
+- **Codex 分两种**（`codexIsRelay` 看当前供应商配置及 auth.json 自动判定，可用 `codex_mode` 强制）：
   - **官方订阅 ✅**：`auth.json` 有 `tokens.access_token`+`account_id`；`GET https://chatgpt.com/backend-api/wham/usage`，
     头 `Authorization: Bearer`、`chatgpt-account-id`；响应 `rate_limit` 有 `primary_window`/`secondary_window` 两窗口，
     字段 `used_percent` + `reset_at`(unix 秒)/`reset_after_seconds` + `limit_window_seconds`(窗口时长)。下发 `codex`（百分比）。
     ⚠️ **不按 primary/secondary 位置判定 5h/周**（OpenAI 两个数据源命名相反，且部分账号已取消 5h 窗口，会把周额度塞进 5h 行）：
     `codex.go` 的 `codexClassify` 按 `limit_window_seconds` 判定——小=5h、大=周；仅一个窗口时以 21600s(6h) 为阈值；
     窗口缺失(零值)时该行经 `leftFromUsed(0)` 显示 100%。做法照搬参照工程 `D:\workspace\ai\sub2api-goai` 的 `Normalize()`。
-  - **中转站**（`auth.json` 只有 `OPENAI_API_KEY` 即 `sk-`）：用该 key 调中转接口，取「已用 + 余额」转成 `money` 帧（见 PROTOCOL.md §4）。
+  - **中转站**：`loadCodexRelaySettings` 优先读当前供应商 `env_key` 指定的环境变量，再读 `experimental_bearer_token`，未配置时回退 `auth.json` 的 `OPENAI_API_KEY`、环境变量 `OPENAI_API_KEY`。`auth.json` 不存在不阻断查询；显式 `env_key` 未设置时直接提示错误，不回退其它 key。用该 key 调中转接口，取「已用 + 余额」转成 `money` 帧（见 PROTOCOL.md §4）。
     base_url 始终来自 `~/.codex/config.toml` 的 `model_providers.<model_provider>.base_url`（用 BurntSushi/toml 解析；不再有 base_url 覆盖项）。
     类型由 `codex_relay_types`（主机名→类型映射，如 `{"goai.im":"sub2api"}`）决定，按 base_url 主机名子串匹配；未命中则自动先试 sub2api 再 new-api。
     **sub2api 展示「今日用量」**（`Relay.Label="Today"`）：`GET <base>/usage`，`remaining`=余额、`usage.today.actual_cost`(兜底 `cost`)=今日用量，`unit` USD→`$`；
