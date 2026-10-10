@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,10 +27,9 @@ const defaultCodexEndpoint = "https://chatgpt.com/backend-api/wham/usage"
 const codexH5MaxWindowSeconds = 21600
 
 // codexAuth 对应 ~/.codex/auth.json 里我们需要的字段。
-// 官方订阅有 tokens.access_token；中转站则只有顶层的 OPENAI_API_KEY（sk-...）。
+// 只读取官方订阅的 tokens.access_token，不读取中转站 API key。
 type codexAuth struct {
-	OpenAIAPIKey string `json:"OPENAI_API_KEY"`
-	Tokens       struct {
+	Tokens struct {
 		AccessToken string `json:"access_token"`
 		AccountID   string `json:"account_id"`
 	} `json:"tokens"`
@@ -57,22 +55,6 @@ func loadCodexAuth() (codexAuth, error) {
 		return a, fmt.Errorf("解析 auth.json 失败: %w", err)
 	}
 	return a, nil
-}
-
-// codexIsRelay 优先识别当前供应商的独立凭据，再兼容 auth.json 的旧配置。
-func codexIsRelay() bool {
-	p, configErr := loadCodexModelProvider()
-	if configErr == nil && !p.RequiresOpenAIAuth && (p.EnvKey != "" || p.ExperimentalBearerToken != "") {
-		return true
-	}
-	a, err := loadCodexAuth()
-	if err != nil {
-		return errors.Is(err, os.ErrNotExist) && configErr == nil && !p.RequiresOpenAIAuth
-	}
-	if a.Tokens.AccessToken == "" && configErr == nil && !p.RequiresOpenAIAuth {
-		return true
-	}
-	return a.Tokens.AccessToken == "" && a.OpenAIAPIKey != ""
 }
 
 // codexUsageResp 是 wham/usage 的响应（只取用到的字段）。

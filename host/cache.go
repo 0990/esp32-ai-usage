@@ -14,10 +14,7 @@ import (
 type dataCache struct {
 	Claude, Reclaude, Codex, Kimi         Provider
 	ClaudeAt, ReclaudeAt, CodexAt, KimiAt time.Time
-	Relay                                 *Relay
-	RelayAt                               time.Time
-	ClaudeRelay                           *Relay
-	ClaudeRelayAt                         time.Time
+	Custom                                map[string]customResult
 }
 
 func cachePath(cfgPath string) string {
@@ -42,10 +39,14 @@ func (e *Engine) loadCache() {
 	e.reclaude, e.reclaudeAt = c.Reclaude, c.ReclaudeAt
 	e.codex, e.codexAt = c.Codex, c.CodexAt
 	e.kimi, e.kimiAt = c.Kimi, c.KimiAt
-	e.relay, e.relayAt = c.Relay, c.RelayAt
-	e.claudeRelay, e.claudeRelayAt = c.ClaudeRelay, c.ClaudeRelayAt
-	if c.Claude.OK || c.Reclaude.OK || c.Codex.OK || c.Kimi.OK ||
-		(c.Relay != nil && c.Relay.OK) || (c.ClaudeRelay != nil && c.ClaudeRelay.OK) {
+	e.custom = c.Custom
+	hasCustom := false
+	for _, r := range c.Custom {
+		if r.Relay.OK {
+			hasCustom = true
+		}
+	}
+	if c.Claude.OK || c.Reclaude.OK || c.Codex.OK || c.Kimi.OK || hasCustom {
 		e.started = true
 		e.log(LogInfo, "cache", "已载入上次数据，先显示旧值（超期自动标 old）")
 	}
@@ -53,14 +54,20 @@ func (e *Engine) loadCache() {
 
 // saveCache 把当前缓存写盘（每次成功取数后调用）。失败只记日志。
 func (e *Engine) saveCache() {
+	cfg := e.Config()
 	e.dataMu.Lock()
 	c := dataCache{
 		Claude: e.claude, ClaudeAt: e.claudeAt,
 		Reclaude: e.reclaude, ReclaudeAt: e.reclaudeAt,
 		Codex: e.codex, CodexAt: e.codexAt,
 		Kimi: e.kimi, KimiAt: e.kimiAt,
-		Relay: e.relay, RelayAt: e.relayAt,
-		ClaudeRelay: e.claudeRelay, ClaudeRelayAt: e.claudeRelayAt,
+		Custom: map[string]customResult{},
+	}
+	for _, obj := range cfg.CustomObjects {
+		key := obj.cacheKey()
+		if value, ok := e.custom[key]; ok {
+			c.Custom[key] = value
+		}
 	}
 	e.dataMu.Unlock()
 	raw, err := json.MarshalIndent(c, "", "  ")

@@ -4,7 +4,7 @@
 Claude / Codex / Kimi 的额度以及中转站余额。
 
 **设计原则：固件只负责「渲染」，不含任何切换/翻页/选择逻辑。**
-host 每发一行 JSON 就是「一整屏」(Frame)，固件收到就照着画。要显示哪一页、什么时候翻页、
+host 每发一行显示 JSON 就是「一整屏」(Frame)，固件收到就照着画。要显示哪一页、什么时候翻页、
 数据是否过期，全部由 host 决定——这样 host 可以灵活控制显示，固件保持极简。
 
 固件解析实现见 [firmware/src/main.cpp](firmware/src/main.cpp)。
@@ -17,14 +17,28 @@ host 每发一行 JSON 就是「一整屏」(Frame)，固件收到就照着画�
 |------|----|
 | 接口 | USB-CDC 串口（C3/S3 一根 USB 线即可） |
 | 波特率 | **115200** |
-| 格式 | **NDJSON**：一行一个 Frame（JSON 对象），以 `\n`（换行）结尾 |
+| 格式 | **NDJSON**：一行一个 Frame 或显示设置命令（JSON 对象），以 `\n`（换行）结尾 |
 | 编码 | ASCII（`\r` 会被忽略） |
 | 单行长度 | < 600 字节（超长行会被丢弃） |
 
 > 每发一行就整屏刷新一次。非法 JSON、空行（<2 字符）会被静默忽略。
 > 翻页由 host 主动驱动：host 每隔约 4 秒发下一页（`all` 监控对象时在多页间轮播）。
 > 固件不保存历史页、不自己翻页；它永远只显示「最近收到的那一帧」。
-> 兜底：超过 **90 秒**没收到任何新行，固件会本地标 `old`（数据过期）。
+> 兜底：超过 **90 秒**没收到新的显示帧，固件会本地标 `old`（数据过期）。
+
+---
+
+## 1.1 OLED 亮度设置
+
+设置页的亮度滑块范围为 0–255，默认 143（原 SSD1306 初始化亮度）。点「保存」后 host 即时发送：
+
+```json
+{"cmd":"display","brightness":80}
+```
+
+这是显示设置命令，不替换画面、不改变工作状态或数据过期计时；即使正在显示 Waiting，也能调整亮度。串口重连时会重新发送，普通显示帧也携带当前 `brightness`，设备重启后持续同步。旧帧未携带此字段时保持现有亮度。
+
+固件调用 `setContrast`，并仅在亮度变化时写入 NVS，ESP32 断电重启后可恢复上次亮度。电脑端配置存为 `oled_brightness`，缺失时使用 143，显式 0 保留；超出范围时钳制到 0–255。
 
 ---
 
@@ -35,16 +49,17 @@ host 每发一行 JSON 就是「一整屏」(Frame)，固件收到就照着画�
 | `k` | 含义 | 用途 |
 |-----|------|------|
 | `"pct"`   | 百分比页 | Claude / Codex / Kimi 官方订阅的 5 小时 + 1 周剩余额度 |
-| `"money"` | 金额页   | 中转站的「已用 / 今日用量」+ 总余额 |
+| `"money"` | 金额页   | sub2api / newapi 的余额 |
 
 通用字段：
 
 | 字段 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `ic` | string | — | 图标。`pct` 页：`"claude"` / `"codex"` / `"kimi"`（内置位图）；`money` 页：货币符号（画在硬币上，如 `"$"`） |
+| `ic` | string | — | 图标。`pct` 页：`"claude"` / `"codex"` / `"kimi"`（内置位图）；`money` 页：`"sub2api"` / `"newapi"`（24×24 内置位图） |
 | `k`  | string | `"pct"` | 页型，见上表 |
 | `l1` | string | — | 第 1 行标签（最长 ~13 字符） |
 | `l2` | string | — | 第 2 行标签 |
+| `brightness` | int | 保留当前亮度 | OLED 对比度/亮度，范围 0–255，0 为最低亮度（不等于关闭） |
 | `old`| bool   | `false` | 数据过期 → 固件叠加显示 `old` |
 | `a`  | int    | `0` | 该页对应 CLI 的工作状态：`0` 空闲（不画）、`1` 工作中（图标下方三个点轮流跑动，RGB 灯蓝色呼吸）、`2` 需要你（图标右上角一枚脉动的「!」角标，RGB 灯紫色快闪）。见 §2.1 |
 
@@ -99,33 +114,28 @@ host 往 Claude Code（`~/.claude/settings.json`）和 Codex CLI（`~/.codex/hoo
 
 ## 4. `money` 金额页（中转站）
 
-显示中转站的用量与总余额。第 1 行的标签由 host 决定：
-
-- **sub2api** 中转站：展示「今日用量」，标签发 `"Today"`。
-- **new-api** 中转站：展示「累计已用」，标签发 `"Used"`。
+sub2api / newapi 页只显示余额。host 通过 `ic` 指定类型图标：`sub2api` 为 S2，`newapi` 为 N，均为 24×24 单色位图，位置与 Codex / Claude 图标一致。
 
 | 字段 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `l1` | string | `"Used"` | 第 1 行标签（`Today` / `Used`） |
-| `v1` | string | `"--"` | 第 1 行金额文本（**已含货币符号**，如 `$1.2`） |
-| `l2` | string | `"Left"` | 第 2 行标签 |
-| `v2` | string | `"--"` | 第 2 行金额（总余额，如 `$880`） |
+| `ic` | string | — | `"sub2api"` / `"newapi"` |
+| `l1` | string | `"Balance"` | 余额标签 |
+| `v1` | string | `"ERR"` | 余额文本，含货币符号，如 `$880` |
+| `old` | bool | false | 数据过期标记 |
 
-> 金额文本由 host 直接格式化好（整数不带小数，非整数保留 1 位），固件原样显示。
-> 货币符号既写在 `v1`/`v2` 里，也通过 `ic` 单独给出（画在左侧硬币上）。
-
-显示效果（左侧货币硬币 + 右侧两行大字）：
+host 不再下发已用金额，`l2` 为空，`v2` 省略。固件右侧显示小字 Balance 和大字余额，大额余额会自动缩小字号。余额缺失或 `ERR` 时状态灯显示异常；过期显示 `old`。
 
 ```
-[ $ ]  Today   $1.2
-       Left    $880
+[S2]  Balance
+      $880
 ```
-
-示例：
 
 ```json
-{"ic":"$","k":"money","l1":"Today","v1":"$1.2","l2":"Left","v2":"$880"}
+{"ic":"sub2api","k":"money","l1":"Balance","v1":"$880"}
+{"ic":"newapi","k":"money","l1":"Balance","v1":"$42.5"}
 ```
+
+固件仍兼容旧货币图标的两行金额帧。新版自定义余额页需要同时更新电脑端和固件。
 
 ---
 
@@ -138,10 +148,10 @@ host 往 Claude Code（`~/.claude/settings.json`）和 Codex CLI（`~/.codex/hoo
 | `claude` | 只发 Claude `pct` 页 |
 | `reclaude` | 只发 ReClaude `pct` 页（使用 Claude 图标） |
 | `codex`（官方） | 只发 Codex `pct` 页 |
-| `codex`（中转） | 只发 `money` 页 |
+| 启用的自定义对象 | 每个对象发一页 `money` |
 | `kimi` | 只发 Kimi `pct` 页 |
 | `all`（官方 codex） | Claude `pct` → ReClaude `pct` → Codex `pct` → Kimi `pct`，每 ~4s 翻一页 |
-| `all`（中转 codex） | Claude `pct` → ReClaude `pct` → `money` → Kimi `pct`，每 ~4s 翻一页 |
+| `all` + 自定义对象 | 内置 `pct` 页后追加启用对象的 `money` 页，每 ~4s 翻一页 |
 
 host 每 ~4 秒发当前页；取到新数据时也会立刻重发当前页。固件只是被动跟随。
 
@@ -168,7 +178,7 @@ host 每 ~4 秒发当前页；取到新数据时也会立刻重发当前页。�
 ```powershell
 # firmware 目录下执行
 powershell -ExecutionPolicy Bypass -File tools\send-test.ps1 -Kind pct   -Port COM3
-powershell -ExecutionPolicy Bypass -File tools\send-test.ps1 -Kind money -V1 "$1.2" -V2 "$880"
+powershell -ExecutionPolicy Bypass -File tools\send-test.ps1 -Kind money -Icon sub2api -V1 '$880'
 ```
 
 > 脚本独占串口，运行时不能同时开 host 程序。端口号用 `pio device list` 查。

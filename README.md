@@ -7,7 +7,7 @@ Codex / Claude / ReClaude / Kimi 订阅：显示 5 小时和 1 周窗口的剩�
 
 ![百分比页](docs/images/eu_claude.JPEG)
 
-中转站（API key 计费,支持sub2api和new-api）：显示已用金额和剩余余额：
+中转站（API key 计费，支持 sub2api 和 newapi）：在监控对象中新增自定义对象，手动填写名称、Base URL 和 API key，OLED 显示独立类型图标和剩余余额。支持多个站点独立勾选和轮播（下图为旧版布局）：
 
 ![中转站页](docs/images/eu_token.JPEG)
 

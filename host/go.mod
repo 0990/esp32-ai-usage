@@ -4,15 +4,14 @@ go 1.25.1
 
 require (
 	fyne.io/fyne/v2 v2.7.4
-	github.com/BurntSushi/toml v1.5.0
 	github.com/fsnotify/fsnotify v1.9.0
-	github.com/mattn/go-sqlite3 v1.14.32
 	go.bug.st/serial v1.7.1
 	golang.org/x/sys v0.43.0
 )
 
 require (
 	fyne.io/systray v1.12.1 // indirect
+	github.com/BurntSushi/toml v1.5.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/fredbi/uri v1.1.1 // indirect
 	github.com/fyne-io/gl-js v0.2.0 // indirect

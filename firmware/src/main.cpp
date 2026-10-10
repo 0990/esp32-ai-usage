@@ -6,12 +6,13 @@
 //
 //   pct  页：{"ic":"claude","k":"pct","l1":"5h","p1":94,"s1":"15:47","l2":"1w","p2":38,"s2":"06-25 14:30"}
 //          （ic 还可为 "codex" / "kimi"）
-//   money页：{"ic":"$","k":"money","l1":"Today","v1":"$1.2","l2":"Left","v2":"$880"}
+//   money页：{"ic":"sub2api","k":"money","l1":"Balance","v1":"$880"}（ic 还可为 "newapi"）
 
 #include <Arduino.h>
 #include <U8g2lib.h>
 #include <Wire.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 
 #ifndef PIN_SDA
 #define PIN_SDA 8
@@ -54,6 +55,25 @@ static const unsigned char ICON_KIMI[] U8X8_PROGMEM = {
   0x70, 0x00, 0x1C,  0x00, 0x00, 0x00,  0x00, 0x00, 0x00,  0x00, 0x00, 0x00
 };
 
+// sub2api 图标：S2。
+static const unsigned char ICON_SUB2API[] U8X8_PROGMEM = {
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0xF8, 0x87, 0x1F, 0xF8, 0x87, 0x1F, 0x1E, 0xE0, 0x79,
+  0x1E, 0xE0, 0x79, 0x1E, 0x00, 0x78, 0x1E, 0x00, 0x78, 0xF8, 0x01, 0x1E,
+  0xF8, 0x01, 0x1E, 0x80, 0x87, 0x07, 0x80, 0x87, 0x07, 0x80, 0xE7, 0x01,
+  0x80, 0xE7, 0x01, 0xFE, 0xE1, 0x7F, 0xFE, 0xE1, 0x7F, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+// newapi 图标：N。
+static const unsigned char ICON_NEWAPI[] U8X8_PROGMEM = {
+  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0, 0x00, 0x0F,
+  0xF0, 0x00, 0x0F, 0xF0, 0x03, 0x0F, 0xF0, 0x03, 0x0F, 0xF0, 0x0F, 0x0F,
+  0xF0, 0x0F, 0x0F, 0xF0, 0x3C, 0x0F, 0xF0, 0x3C, 0x0F, 0xF0, 0x3C, 0x0F,
+  0xF0, 0x3C, 0x0F, 0xF0, 0xF0, 0x0F, 0xF0, 0xF0, 0x0F, 0xF0, 0xC0, 0x0F,
+  0xF0, 0xC0, 0x0F, 0xF0, 0x00, 0x0F, 0xF0, 0x00, 0x0F, 0xF0, 0x00, 0x0F,
+  0xF0, 0x00, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
 // host 已不再发心跳频率信息；超过这么久没收到新行就本地兜底标 stale。
 static const uint32_t STALE_MS = 90000;
 
@@ -62,7 +82,7 @@ static const int ActIdle_ = 0, ActBusy_ = 1, ActAttention_ = 2;
 
 // 一帧 = 一整屏。kind 决定怎么渲染。
 struct Frame {
-  char ic[10] = "";     // pct: "claude"/"codex"/"kimi"；money: 货币符号（画在硬币上）
+  char ic[10] = "";     // pct: "claude"/"codex"/"kimi"；money: "sub2api"/"newapi"
   char k[8]   = "pct";  // "pct" | "money"
   char l1[14] = "";     // 第 1 行标签
   char l2[14] = "";     // 第 2 行标签
@@ -76,6 +96,11 @@ struct Frame {
   int  a      = 0;      // 工作状态：0=空闲 1=工作中（跑动的点） 2=需要你（图标闪烁）
   bool valid  = false;  // 是否收到过有效帧
 };
+
+// 只在亮度变化时写 NVS，设备独立重启后也恢复亮度。
+Preferences displayPrefs;
+uint8_t oledBrightness = 143;
+bool displayPrefsReady = false;
 
 Frame    frame;
 uint32_t lastUpdateMs = 0;  // 最近一次成功解析的时间，0 表示从未收到
@@ -103,6 +128,17 @@ void parseLine(const String &line) {
   if (line.length() < 2) return;
   JsonDocument doc;
   if (deserializeJson(doc, line)) return;  // 非法 JSON 直接忽略
+
+  if (doc["brightness"].is<int>()) {
+    int value = constrain(doc["brightness"].as<int>(), 0, 255);
+    if (oledBrightness != value) {
+      oledBrightness = (uint8_t)value;
+      u8g2.setContrast(oledBrightness);
+      if (displayPrefsReady) displayPrefs.putUChar("brightness", oledBrightness);
+    }
+  }
+  // 设置命令只调整亮度，不替换当前画面，不改变数据时间或工作状态。
+  if (doc["cmd"].is<const char *>()) return;
 
   Frame f;
   strlcpy(f.ic, doc["ic"] | "", sizeof(f.ic));
@@ -235,8 +271,39 @@ void drawPctFrame(const Frame &f, bool stale) {
   u8g2.sendBuffer();
 }
 
+// 自定义余额页：左侧 24x24 类型图标，右侧只显示余额。
+bool isBalanceFrame(const Frame &f) {
+  return strcmp(f.ic, "sub2api") == 0 || strcmp(f.ic, "newapi") == 0;
+}
+
+void drawBalanceFrame(const Frame &f, bool stale) {
+  u8g2.clearBuffer();
+  const unsigned char *icon = strcmp(f.ic, "sub2api") == 0 ? ICON_SUB2API : ICON_NEWAPI;
+  u8g2.drawXBMP(0, (32 - ICON_H) / 2, ICON_W, ICON_H, icon);
+  const int xL = ICON_W + 2, xR = 126;
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(xL, 7, "Balance");
+  if (stale) u8g2.drawStr(xR - u8g2.getStrWidth("old"), 7, "old");
+
+  const char *value = f.v1[0] ? f.v1 : "ERR";
+  // 大额余额逐级缩小字号，避免越过图标或屏幕右边界。
+  const uint8_t *fonts[] = {u8g2_font_helvB18_tr, u8g2_font_helvB14_tr, u8g2_font_helvB10_tr, u8g2_font_5x7_tr};
+  for (const uint8_t *font : fonts) {
+    u8g2.setFont(font);
+    if (u8g2.getStrWidth(value) <= xR - xL) break;
+  }
+  int width = u8g2.getStrWidth(value);
+  u8g2.drawStr(xL + (xR - xL - width) / 2, 29, value);
+  drawActivity(f.a);
+  u8g2.sendBuffer();
+}
+
 // money 帧：左侧画一枚带货币符号的硬币，右侧两行金额。
 void drawMoneyFrame(const Frame &f, bool stale) {
+  if (isBalanceFrame(f)) {
+    drawBalanceFrame(f, stale);
+    return;
+  }
   u8g2.clearBuffer();
 
   u8g2.drawDisc(11, 16, 9);
@@ -311,7 +378,10 @@ void setLed(LedState s) {
 
 // 帧是否处于异常态：pct 任一窗口为 ERR(-1)，或 money 金额两行全空。
 bool frameHasError(const Frame &f) {
-  if (strcmp(f.k, "money") == 0) return f.v1[0] == '\0' && f.v2[0] == '\0';
+  if (strcmp(f.k, "money") == 0) {
+    if (isBalanceFrame(f)) return f.v1[0] == '\0' || strcmp(f.v1, "ERR") == 0;
+    return (f.v1[0] == '\0' && f.v2[0] == '\0') || strcmp(f.v1, "ERR") == 0 || strcmp(f.v2, "ERR") == 0;
+  }
   return f.p1 < 0 || f.p2 < 0;
 }
 
@@ -320,6 +390,9 @@ void setup() {
   Wire.begin(PIN_SDA, PIN_SCL);
   u8g2.setI2CAddress(0x3C * 2);
   u8g2.begin();
+  displayPrefsReady = displayPrefs.begin("oled-display", false);
+  if (displayPrefsReady) oledBrightness = displayPrefs.getUChar("brightness", 143);
+  u8g2.setContrast(oledBrightness);
   setLed(LED_WAIT);
   drawWaiting();
 }

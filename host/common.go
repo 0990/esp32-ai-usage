@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -19,7 +20,7 @@ type Provider struct {
 	OK bool   `json:"ok"`
 }
 
-// Relay 是中转站余额（金额）。Codex 走中转 API key 时用它替代 Codex 百分比。
+// Relay 是自定义监控对象的中转站余额（金额）。
 // 它只是 host 内部数据；下发给固件时会被转换成 Frame（见下）。
 type Relay struct {
 	Used    float64 // 已用量：sub2api=今日用量，new-api=累计已用
@@ -33,19 +34,20 @@ type Relay struct {
 // host 全权决定显示什么/翻不翻页/是否过期；固件只渲染收到的最新 Frame。
 // 两种 kind：
 //   - "pct"  ：两行百分比窗口（5h / 1w），icon = "claude"/"codex"，p1/p2 为剩余百分比(-1=ERR)，s1/s2 为重置时间。
-//   - "money"：两行金额（Used/Today、Left），icon = 货币符号（画在硬币上），v1/v2 为已格式化金额文本。
+//   - "money"：自定义对象余额页，icon = "sub2api"/"newapi"，v1 为已格式化余额文本。
 type Frame struct {
-	Icon string `json:"ic"`            // pct: "claude"/"codex"；money: 货币符号（如 "$"）
-	Kind string `json:"k"`             // "pct" | "money"
-	L1   string `json:"l1"`            // 第 1 行标签
-	L2   string `json:"l2"`            // 第 2 行标签
-	P1   int    `json:"p1"`            // pct: 第 1 行剩余百分比（-1=ERR）；money 时为 -1
-	P2   int    `json:"p2"`            // pct: 第 2 行剩余百分比（-1=ERR）；money 时为 -1
-	S1   string `json:"s1,omitempty"`  // pct: 第 1 行重置时间
-	S2   string `json:"s2,omitempty"`  // pct: 第 2 行重置时间
-	V1   string `json:"v1,omitempty"`  // money: 第 1 行金额文本
-	V2   string `json:"v2,omitempty"`  // money: 第 2 行金额文本
-	Old  bool   `json:"old,omitempty"` // 数据过期 → 固件叠加 "old"
+	Brightness *int   `json:"brightness,omitempty"` // 可选 OLED 亮度 0–255；nil 保留设备当前值
+	Icon       string `json:"ic"`                   // pct: "claude"/"codex"；money: "sub2api"/"newapi"
+	Kind       string `json:"k"`                    // "pct" | "money"
+	L1         string `json:"l1"`                   // 第 1 行标签
+	L2         string `json:"l2"`                   // 第 2 行标签
+	P1         int    `json:"p1"`                   // pct: 第 1 行剩余百分比（-1=ERR）；money 时为 -1
+	P2         int    `json:"p2"`                   // pct: 第 2 行剩余百分比（-1=ERR）；money 时为 -1
+	S1         string `json:"s1,omitempty"`         // pct: 第 1 行重置时间
+	S2         string `json:"s2,omitempty"`         // pct: 第 2 行重置时间
+	V1         string `json:"v1,omitempty"`         // money: 第 1 行金额文本
+	V2         string `json:"v2,omitempty"`         // money: 第 2 行金额文本
+	Old        bool   `json:"old,omitempty"`        // 数据过期 → 固件叠加 "old"
 	// Act 是该页 provider 对应 CLI 的工作状态（来自 hook 回调，见 activity.go）：
 	// 0=空闲（不画）、1=工作中（固件画跑动的点）、2=需要你（固件让图标闪烁）。
 	Act int `json:"a,omitempty"`
@@ -73,19 +75,11 @@ func pctFrame(icon string, p Provider, stale bool) Frame {
 	}
 }
 
-// moneyFrame 把中转站余额转成一帧 money。
-func moneyFrame(r Relay, stale bool) Frame {
-	icon := currencySymbol(r.Unit)
-	label := r.Label
-	if label == "" {
-		label = "Used"
-	}
-	f := Frame{Icon: icon, Kind: "money", L1: label, L2: "Left", P1: -1, P2: -1, Old: stale}
+// balanceFrame 下发自定义对象的类型图标和余额；OLED 不显示已用金额。
+func balanceFrame(typ string, r Relay, stale bool) Frame {
+	f := Frame{Icon: typ, Kind: "money", L1: "Balance", P1: -1, P2: -1, Old: stale, V1: "ERR"}
 	if r.OK {
-		f.V1 = fmtMoney(r.Unit, r.Used)
-		f.V2 = fmtMoney(r.Unit, r.Balance)
-	} else {
-		f.V1, f.V2 = "ERR", "ERR"
+		f.V1 = fmtMoney(r.Unit, r.Balance)
 	}
 	return f
 }
@@ -177,4 +171,24 @@ func expandHome(p string) string {
 		}
 	}
 	return p
+}
+
+const defaultOLEDBrightness = 143
+
+func clampOLEDBrightness(value int) int {
+	if value < 0 {
+		return 0
+	}
+	if value > 255 {
+		return 255
+	}
+	return value
+}
+
+func displaySettingsCommand(brightness int) []byte {
+	raw, _ := json.Marshal(struct {
+		Command    string `json:"cmd"`
+		Brightness int    `json:"brightness"`
+	}{Command: "display", Brightness: clampOLEDBrightness(brightness)})
+	return raw
 }

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -37,13 +36,10 @@ type GUI struct {
 	logLines  []string
 	logLabel  *widget.Label
 	logScroll *container.Scroll
-	status    *widget.Label // 常驻底部的串口状态
+	status    *widget.Label  // 常驻底部的串口状态
 	actLabel  *widget.Label  // 常驻底部右侧：Claude / Codex 的工作状态
 	actState  map[string]int // provider -> Act*（OnActivity 回调更新）
 
-	// refreshRelayRows 重建设置页的「中转站类型」域名列表（buildSettingsTab 里赋值）。
-	// 凭据/配置变动时由 OnCredsChange 触发；须在 UI 线程调用。
-	refreshRelayRows func()
 }
 
 // RunGUI 构建界面、启动引擎并进入事件循环（阻塞直到退出）。
@@ -60,14 +56,6 @@ func RunGUI(cfg Config, cfgPath string, ln net.Listener) {
 	g.engine.OnLog = func(e LogEntry) { fyne.Do(func() { g.appendLog(e) }) }
 	g.engine.OnStatus = func(s string) { fyne.Do(func() { g.status.SetText(s) }) }
 	g.engine.OnActivity = func(p string, s int) { fyne.Do(func() { g.setActivity(p, s) }) }
-	// 凭据/配置变动（如切换中转站）→ 自动刷新设置页的中转站域名列表。
-	g.engine.OnCredsChange = func() {
-		fyne.Do(func() {
-			if g.refreshRelayRows != nil {
-				g.refreshRelayRows()
-			}
-		})
-	}
 
 	// 单实例：后启动的实例来敲门时，把本窗口拉到前台（feature 3）。
 	if ln != nil {
@@ -78,6 +66,7 @@ func RunGUI(cfg Config, cfgPath string, ln net.Listener) {
 
 	w.SetContent(g.buildUI())
 	w.Resize(fyne.NewSize(760, 520))
+	g.fitWindowHeight()
 
 	g.setupTray(icon)
 	w.SetCloseIntercept(func() { w.Hide() }) // 关窗 → 收进托盘，不退出
@@ -196,49 +185,71 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 	codexEntry.SetText(cfg.CodexEndpoint)
 	codexEntry.SetPlaceHolder(defaultCodexEndpoint)
 
-	// 中转站类型：两列列表（域名 | 类型下拉）。域名自动检测（Codex 走 sk- key 时的
-	// base_url）；已保存过类型的旧域名即使不再使用也保留一行（换站后设置不丢）。
-	var relayRows []*relayTypeRow
-	relayList := container.New(layout.NewFormLayout())
-
-	// collectRelayTypes 把列表当前选择收集成映射；auto 不入表（缺省即自动识别）。
-	collectRelayTypes := func() map[string]string {
-		m := map[string]string{}
-		for _, r := range relayRows {
-			if v := r.sel.Selected; v != "" && v != "auto" {
-				m[r.host] = v
+	customObjects := append([]CustomObject(nil), cfg.CustomObjects...)
+	customList := container.NewVBox()
+	var rebuildCustom func()
+	var editCustom func(int)
+	editCustom = func(index int) {
+		obj := CustomObject{ID: newCustomID(), Enabled: true, Type: "sub2api"}
+		if index >= 0 {
+			obj = customObjects[index]
+		}
+		name := widget.NewEntry()
+		name.SetText(obj.Name)
+		typ := widget.NewSelect([]string{"sub2api", "newapi"}, nil)
+		typ.SetSelected(obj.Type)
+		base := widget.NewEntry()
+		base.SetText(obj.BaseURL)
+		base.SetPlaceHolder("https://relay.example 或 https://relay.example/v1")
+		key := widget.NewPasswordEntry()
+		key.SetText(obj.APIKey)
+		var d *dialog.CustomDialog
+		submit := widget.NewButton("确定", func() {
+			obj.Name = strings.TrimSpace(name.Text)
+			obj.Type = typ.Selected
+			obj.BaseURL = strings.TrimRight(strings.TrimSpace(base.Text), "/")
+			obj.APIKey = strings.TrimSpace(key.Text)
+			if err := obj.validate(); err != nil {
+				dialog.ShowError(err, g.win)
+				return
 			}
-		}
-		if len(m) == 0 {
-			return nil
-		}
-		return m
+			for i, other := range customObjects {
+				if i != index && strings.EqualFold(other.Name, obj.Name) {
+					dialog.ShowError(fmt.Errorf("名称已存在，请使用不同名称"), g.win)
+					return
+				}
+			}
+			if index >= 0 {
+				customObjects[index] = obj
+			} else {
+				customObjects = append(customObjects, obj)
+			}
+			rebuildCustom()
+			d.Hide()
+		})
+		form := widget.NewForm(widget.NewFormItem("名称", name), widget.NewFormItem("类型", typ), widget.NewFormItem("Base URL", base), widget.NewFormItem("API key", key))
+		d = dialog.NewCustom("自定义监控对象", "取消", container.NewVBox(form, widget.NewLabel("点击设置页的保存后生效"), submit), g.win)
+		d.Resize(fyne.NewSize(580, 320))
+		d.Show()
 	}
-
-	rebuildRelayRows := func(saved map[string]string) {
-		relayRows = nil
-		relayList.Objects = nil
-		for _, h := range mergedRelayHosts(saved) {
-			sel := widget.NewSelect(relayTypeOptions, nil)
-			sel.SetSelected(normalizeRelayType(saved[h]))
-			relayRows = append(relayRows, &relayTypeRow{host: h, sel: sel})
-			relayList.Add(widget.NewLabel(h))
-			relayList.Add(sel)
+	rebuildCustom = func() {
+		customList.Objects = nil
+		for i, obj := range customObjects {
+			index := i
+			check := widget.NewCheck(obj.Name+" ("+obj.Type+")", func(on bool) { customObjects[index].Enabled = on })
+			check.SetChecked(obj.Enabled)
+			edit := widget.NewButton("编辑", func() { editCustom(index) })
+			remove := widget.NewButton("删除", func() { customObjects = append(customObjects[:index], customObjects[index+1:]...); rebuildCustom() })
+			customList.Add(container.NewBorder(nil, nil, nil, container.NewHBox(edit, remove), check))
 		}
-		if len(relayRows) == 0 {
-			relayList.Add(widget.NewLabel("（未检测到中转站）"))
-			relayList.Add(widget.NewLabel(""))
+		customList.Refresh()
+		if g.win.Canvas().Content() != nil {
+			g.fitWindowHeight()
 		}
-		relayList.Refresh()
 	}
-	rebuildRelayRows(cfg.CodexRelayTypes)
-
-	// 凭据/配置变动（watcher 检测到换站等）→ 自动重建域名列表；
-	// 合并未保存的当前选择，避免正在编辑时被刷掉。由 OnCredsChange 在 UI 线程调用。
-	g.refreshRelayRows = func() {
-		rebuildRelayRows(mergeRelayTypes(g.engine.Config().CodexRelayTypes, collectRelayTypes()))
-		g.fitWindowHeight() // 行数可能变多，窗口跟着长高
-	}
+	rebuildCustom()
+	addCustom := widget.NewButton("新增自定义对象", func() { editCustom(-1) })
+	monitorObjects := container.NewVBox(providerChecks, customList, container.NewHBox(addCustom))
 
 	autostartCheck := widget.NewCheck("开机时自动启动本程序", nil)
 	autostartCheck.SetChecked(cfg.Autostart)
@@ -277,11 +288,19 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 	})
 	hooksRow := container.NewHBox(hooksStatus, installHooksBtn, removeHooksBtn)
 
+	brightnessSlider := widget.NewSlider(0, 255)
+	brightnessSlider.Step = 1
+	brightnessValue := widget.NewLabel("")
+	brightnessSlider.OnChanged = func(value float64) { brightnessValue.SetText(fmt.Sprintf("%d / 255", int(value))) }
+	brightnessSlider.SetValue(float64(clampOLEDBrightness(cfg.OLEDBrightness)))
+	brightnessValue.SetText(fmt.Sprintf("%d / 255", int(brightnessSlider.Value)))
+	brightnessRow := container.NewBorder(nil, nil, nil, brightnessValue, brightnessSlider)
+
 	topForm := widget.NewForm(
-		widget.NewFormItem("监控对象", providerChecks),
+		widget.NewFormItem("监控对象", monitorObjects),
+		widget.NewFormItem("OLED 亮度", brightnessRow),
 		widget.NewFormItem("开机启动", autostartCheck),
 		widget.NewFormItem("运行标志钩子", hooksRow),
-		widget.NewFormItem("中转站类型", relayList),
 	)
 	moreForm := widget.NewForm(
 		widget.NewFormItem("串口 Port", portEntry),
@@ -328,7 +347,13 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 			dialog.ShowError(fmt.Errorf("轮播间隔必须是正整数"), g.win)
 			return
 		}
-		if len(providerChecks.Selected) == 0 {
+		hasCustom := false
+		for _, obj := range customObjects {
+			if obj.Enabled {
+				hasCustom = true
+			}
+		}
+		if len(providerChecks.Selected) == 0 && !hasCustom {
 			dialog.ShowError(fmt.Errorf("请至少勾选一个监控对象"), g.win)
 			return
 		}
@@ -338,6 +363,7 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 		}
 		old := g.engine.Config()
 		newCfg := Config{
+			OLEDBrightness:       int(brightnessSlider.Value),
 			Port:                 strings.TrimSpace(portEntry.Text),
 			Baud:                 baud,
 			IntervalSeconds:      interval,
@@ -347,8 +373,8 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 			Proxy:                strings.TrimSpace(proxyEntry.Text),
 			ClaudeEndPoint:       strings.TrimSpace(claudeEntry.Text),
 			CodexEndpoint:        strings.TrimSpace(codexEntry.Text),
-			CodexMode:            old.CodexMode, // UI 已移除，保留配置文件里手写的值
-			CodexRelayTypes:      collectRelayTypes(),
+			CustomObjects:        append([]CustomObject(nil), customObjects...),
+			KimiEndpoint:         old.KimiEndpoint,
 			Autostart:            autostartCheck.Checked,
 		}
 		if newCfg.Port == "" {
@@ -437,90 +463,6 @@ func (g *GUI) setupTray(icon fyne.Resource) {
 	// 关联主窗口：点击/双击托盘图标 → 显示主窗口（右键仍弹菜单）。
 	// 内部用的是 systray.SetOnTapped，左键抬起即触发，双击自然生效。
 	desk.SetSystemTrayWindow(g.win)
-}
-
-// relayTypeRow 是「中转站类型」列表的一行：域名 + 类型下拉。
-type relayTypeRow struct {
-	host string
-	sel  *widget.Select
-}
-
-var relayTypeOptions = []string{"auto", "sub2api", "new-api"}
-
-// normalizeRelayType 把配置里的类型值规范成下拉选项；空/未知一律 auto。
-func normalizeRelayType(v string) string {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "sub2api":
-		return "sub2api"
-	case "new-api", "newapi", "new_api":
-		return "new-api"
-	default:
-		return "auto"
-	}
-}
-
-// detectRelayHosts 检测当前生效的中转站域名。中转站 = 只用 API key（sk-）取数的站点：
-//   - Codex 走中转时 ~/.codex/config.toml 当前供应商的 base_url 域名。
-//   - Claude 走中转（~/.claude/settings.json 的 env 有 ANTHROPIC_BASE_URL 且
-//     ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN 任一非空）时该 base_url 域名。
-func detectRelayHosts() []string {
-	var hosts []string
-	if codexIsRelay() {
-		if base, err := loadCodexRelayBaseURL(); err == nil {
-			if h := relayHost(base); h != "" {
-				hosts = append(hosts, h)
-			}
-		}
-	}
-	if claudeIsRelay() {
-		if _, base, err := loadClaudeRelaySettings(); err == nil {
-			if h := relayHost(base); h != "" {
-				hosts = append(hosts, h)
-			}
-		}
-	}
-	return hosts
-}
-
-// mergedRelayHosts = 已保存映射里的域名 ∪ 当前检测到的域名（排序稳定显示）。
-// 检测到的域名若已被某个已保存 key 子串命中（如 goai.im 命中 api.goai.im）则不重复加行。
-func mergedRelayHosts(saved map[string]string) []string {
-	set := map[string]bool{}
-	for k := range saved {
-		if k = strings.ToLower(strings.TrimSpace(k)); k != "" {
-			set[k] = true
-		}
-	}
-	for _, h := range detectRelayHosts() {
-		matched := false
-		for k := range set {
-			if strings.Contains(h, k) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			set[h] = true
-		}
-	}
-	hosts := make([]string, 0, len(set))
-	for h := range set {
-		hosts = append(hosts, h)
-	}
-	sort.Strings(hosts)
-	return hosts
-}
-
-// mergeRelayTypes 合并两个映射，b 覆盖 a（用于「重新检测」时保住未保存的选择）。
-func mergeRelayTypes(a, b map[string]string) map[string]string {
-	m := map[string]string{}
-	for k, v := range a {
-		m[k] = v
-	}
-	for k, v := range b {
-		m[k] = v
-	}
-	return m
 }
 
 // quit 干净退出：停引擎并结束事件循环。

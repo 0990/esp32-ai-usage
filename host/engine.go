@@ -75,21 +75,12 @@ type Engine struct {
 	reconnect chan struct{} // 通知串口管理循环：端口已断开/配置已变，立即重连
 
 	// 取数结果缓存（供显示循环按页渲染），由 dataMu 保护。
-	dataMu        sync.Mutex
-	claude        Provider  // 官方百分比额度
-	reclaude      Provider  // ReClaude 百分比额度（经本机 daemon）
-	codex         Provider  // 官方百分比额度
-	kimi          Provider  // 官方百分比额度
-	relay         *Relay    // 中转站余额（codex 走中转时）；nil=非中转
-	claudeRelay   *Relay    // 中转站余额（claude 走中转时）；nil=非中转
-	claudeAt      time.Time // 最近一次成功取数时间（用于过期判定）
-	reclaudeAt    time.Time
-	codexAt       time.Time
-	kimiAt        time.Time
-	relayAt       time.Time
-	claudeRelayAt time.Time
-	started       bool // 是否已完成首轮取数（用于首屏「等待」判定）
-	pageIdx       int  // all 模式当前页索引
+	dataMu                                sync.Mutex
+	claude, reclaude, codex, kimi         Provider
+	claudeAt, reclaudeAt, codexAt, kimiAt time.Time
+	custom                                map[string]customResult
+	started                               bool
+	pageIdx                               int
 
 	// activity 记录 Claude Code / Codex CLI 的工作状态（由 hook 回调驱动，见 activity.go）。
 	activity *ActivityTracker
@@ -97,9 +88,6 @@ type Engine struct {
 	// 回调由界面设置；界面实现体须包进 fyne.Do。
 	OnLog    func(LogEntry)
 	OnStatus func(string)
-	// OnCredsChange 在 watcher 检测到 ~/.codex、~/.claude 凭据/配置变动时调用
-	// （已 debounce），供界面刷新依赖凭据的展示（如中转站域名列表）。
-	OnCredsChange func()
 	// OnActivity 在某个 provider 的工作状态聚合值变化时调用（provider: claude/codex；state 见 Act*）。
 	OnActivity func(provider string, state int)
 
@@ -110,6 +98,7 @@ type Engine struct {
 
 // NewEngine 构造引擎（尚未启动 goroutine）。
 func NewEngine(cfg Config, cfgPath string) *Engine {
+	cfg.CustomObjects = append([]CustomObject(nil), cfg.CustomObjects...)
 	e := &Engine{
 		cfg:       cfg,
 		cfgPath:   cfgPath,
@@ -154,22 +143,32 @@ func (e *Engine) status(s string) {
 func (e *Engine) Config() Config {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	return e.cfg
+	cfg := e.cfg
+	cfg.CustomObjects = append([]CustomObject(nil), cfg.CustomObjects...)
+	return cfg
 }
 
 // UpdateConfig 应用整套新配置：更新内存、重建 HTTP client（代理可能变）、写盘、催一次刷新。
 // 注意：串口（port/baud）的重连由界面在保存后另行处理。
 func (e *Engine) UpdateConfig(cfg Config) error {
 	cfg.Provider = normalizeProvider(cfg.Provider)
-	e.mu.Lock()
-	e.cfg = cfg
-	e.client = newHTTPClient(cfg.Proxy)
-	e.mu.Unlock()
-
+	cfg.OLEDBrightness = clampOLEDBrightness(cfg.OLEDBrightness)
+	cfg.CustomObjects = append([]CustomObject(nil), cfg.CustomObjects...)
+	for _, obj := range cfg.CustomObjects {
+		if err := obj.validate(); err != nil {
+			return fmt.Errorf("自定义对象 %s: %w", obj.Name, err)
+		}
+	}
 	if err := saveConfig(e.cfgPath, cfg); err != nil {
 		e.log(LogError, "engine", "保存配置失败: %v", err)
 		return err
 	}
+	e.mu.Lock()
+	e.cfg = cfg
+	e.client = newHTTPClient(cfg.Proxy)
+	e.mu.Unlock()
+	e.sendDisplaySettings()
+	e.signalRefresh()
 	e.log(LogInfo, "engine", "配置已保存（provider=%s, interval=%ds, retry=%ds）", cfg.Provider, cfg.IntervalSeconds, cfg.RetryIntervalSeconds)
 	e.Reload()
 	return nil
@@ -236,6 +235,14 @@ func (e *Engine) Send(line []byte) {
 	case e.writeCh <- line:
 	case <-e.ctx.Done():
 	}
+}
+
+// 单独发送显示设置；没有取数结果时也能调整 Waiting 页面亮度。
+func (e *Engine) sendDisplaySettings() {
+	if e.ctx == nil {
+		return
+	} // 引擎尚未启动
+	e.Send(displaySettingsCommand(e.Config().OLEDBrightness))
 }
 
 // Start 启动串口管理、串口写入、取数、显示四个 goroutine，外加凭据文件监听。
@@ -380,6 +387,7 @@ func (e *Engine) tryOpen(name string, baud int, logFail bool) {
 	}
 	e.setPort(p, name, fmt.Sprintf("串口: %s @ %d", name, baud))
 	e.log(LogInfo, "serial", "已连接 %s @ %d", name, baud)
+	e.sendDisplaySettings()
 	// 串口刚连上就把当前页发过去：启动时首帧往往早于串口就绪而被丢弃，
 	// 否则要等到下一次翻页定时器（轮播间隔可能长达 60s）屏幕才会离开等待屏。
 	e.signalRefresh()
@@ -434,67 +442,53 @@ func (e *Engine) fetchOnce(ctx context.Context, client *http.Client, cfg Config)
 			defer reclaudeClient.CloseIdleConnections()
 		}
 	}
-	if cfg.wants("codex") {
-		if resolveCodexRelay(cfg) { // 中转站：取余额
-			if r, err := fetchCodexRelay(ctx, client, cfg); err != nil {
-				if ctx.Err() == nil {
-					e.log(LogError, "relay", "%v", err)
-				}
-			} else {
-				e.dataMu.Lock()
-				e.relay = &r
-				e.relayAt = time.Now()
-				e.dataMu.Unlock()
-				e.log(LogInfo, "relay", "%s %s%g / 余额 %s%g", r.Label, r.Unit, r.Used, r.Unit, r.Balance)
-				success = true
-			}
-		} else { // 官方订阅：取百分比额度
-			if p, err := fetchCodex(ctx, client, cfg.CodexEndpoint, false); err != nil {
-				if ctx.Err() == nil {
-					e.log(LogError, "codex", "%v", err)
-				}
-			} else {
-				e.dataMu.Lock()
-				e.codex = p
-				e.codexAt = time.Now()
-				e.relay = nil // 切回官方时清掉中转余额，避免残留中转页
-				e.dataMu.Unlock()
-				e.log(LogInfo, "codex", "5h 剩 %d%% (复位 %s) / 周 剩 %d%% (复位 %s)",
-					p.H5.Left, p.H5.Reset, p.Wk.Left, p.Wk.Reset)
-				success = true
-			}
+	for _, p := range []struct {
+		name, endpoint string
+		fetch          func(context.Context, *http.Client, string, bool) (Provider, error)
+	}{
+		{"codex", cfg.CodexEndpoint, fetchCodex}, {"claude", cfg.ClaudeEndPoint, fetchClaude},
+	} {
+		if !cfg.wants(p.name) {
+			continue
 		}
+		value, err := p.fetch(ctx, client, p.endpoint, false)
+		if err != nil {
+			if ctx.Err() == nil {
+				e.log(LogError, p.name, "%v", err)
+			}
+			continue
+		}
+		e.dataMu.Lock()
+		if p.name == "codex" {
+			e.codex = value
+			e.codexAt = time.Now()
+		} else {
+			e.claude = value
+			e.claudeAt = time.Now()
+		}
+		e.dataMu.Unlock()
+		e.log(LogInfo, p.name, "5h 剩 %d%% / 周 剩 %d%%", value.H5.Left, value.Wk.Left)
+		success = true
 	}
-	if cfg.wants("claude") {
-		if claudeIsRelay() { // 中转站：取余额
-			if r, err := fetchClaudeRelay(ctx, client, cfg); err != nil {
-				if ctx.Err() == nil {
-					e.log(LogError, "claude-relay", "%v", err)
-				}
-			} else {
-				e.dataMu.Lock()
-				e.claudeRelay = &r
-				e.claudeRelayAt = time.Now()
-				e.dataMu.Unlock()
-				e.log(LogInfo, "claude-relay", "%s %s%g / 余额 %s%g", r.Label, r.Unit, r.Used, r.Unit, r.Balance)
-				success = true
-			}
-		} else { // 官方订阅：取百分比额度
-			if p, err := fetchClaude(ctx, client, cfg.ClaudeEndPoint, false); err != nil {
-				if ctx.Err() == nil {
-					e.log(LogError, "claude", "%v", err)
-				}
-			} else {
-				e.dataMu.Lock()
-				e.claude = p
-				e.claudeAt = time.Now()
-				e.claudeRelay = nil // 切回官方时清掉中转余额，避免残留中转页
-				e.dataMu.Unlock()
-				e.log(LogInfo, "claude", "5h 剩 %d%% (复位 %s) / 周 剩 %d%% (复位 %s)",
-					p.H5.Left, p.H5.Reset, p.Wk.Left, p.Wk.Reset)
-				success = true
-			}
+	for _, obj := range cfg.CustomObjects {
+		if !obj.Enabled {
+			continue
 		}
+		r, err := fetchCustomObject(ctx, client, obj)
+		if err != nil {
+			if ctx.Err() == nil {
+				e.log(LogError, obj.Name, "%v", err)
+			}
+			continue
+		}
+		e.dataMu.Lock()
+		if e.custom == nil {
+			e.custom = map[string]customResult{}
+		}
+		e.custom[obj.cacheKey()] = customResult{Relay: r, At: time.Now()}
+		e.dataMu.Unlock()
+		e.log(LogInfo, obj.Name, "%s %s%g / 余额 %s%g", r.Label, r.Unit, r.Used, r.Unit, r.Balance)
+		success = true
 	}
 	if cfg.wants("reclaude") && reclaudeClient != nil {
 		// ReClaude's daemon proxies the first-party Anthropic endpoint. Keep this
@@ -589,6 +583,8 @@ func (e *Engine) renderCurrent(advance bool) {
 	idx := e.pageIdx
 	e.dataMu.Unlock()
 
+	brightness := clampOLEDBrightness(e.Config().OLEDBrightness)
+	frames[idx].Brightness = &brightness
 	line, _ := json.Marshal(frames[idx])
 	e.Send(line)
 }
@@ -616,12 +612,7 @@ func (e *Engine) buildFrames() []Frame {
 	codexAct := e.activity.State("codex")
 	var frames []Frame
 	if cfg.wants("claude") {
-		var f Frame
-		if e.claudeRelay != nil { // claude 走中转 → 中转页
-			f = moneyFrame(*e.claudeRelay, stale(e.claudeRelayAt))
-		} else {
-			f = pctFrame("claude", e.claude, stale(e.claudeAt))
-		}
+		f := pctFrame("claude", e.claude, stale(e.claudeAt))
 		f.Act = claudeAct
 		frames = append(frames, f)
 	}
@@ -631,17 +622,19 @@ func (e *Engine) buildFrames() []Frame {
 		frames = append(frames, f)
 	}
 	if cfg.wants("codex") {
-		var f Frame
-		if e.relay != nil { // codex 走中转 → 中转页
-			f = moneyFrame(*e.relay, stale(e.relayAt))
-		} else {
-			f = pctFrame("codex", e.codex, stale(e.codexAt))
-		}
+		f := pctFrame("codex", e.codex, stale(e.codexAt))
 		f.Act = codexAct
 		frames = append(frames, f)
 	}
 	if cfg.wants("kimi") {
 		frames = append(frames, pctFrame("kimi", e.kimi, stale(e.kimiAt)))
+	}
+	for _, obj := range cfg.CustomObjects {
+		if !obj.Enabled {
+			continue
+		}
+		result := e.custom[obj.cacheKey()]
+		frames = append(frames, balanceFrame(obj.Type, result.Relay, stale(result.At)))
 	}
 	return frames
 }

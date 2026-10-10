@@ -20,6 +20,7 @@ import (
 
 // Config 来自 config.json，所有字段都有默认值。
 type Config struct {
+	OLEDBrightness  int    `json:"oled_brightness"`  // 0–255，默认 143（SSD1306 原始亮度）
 	Port            string `json:"port"`             // "AUTO" 或具体串口名（COM5）
 	Baud            int    `json:"baud"`             // 默认 115200
 	IntervalSeconds int    `json:"interval_seconds"` // 取数成功后的正常轮询间隔，默认 300
@@ -35,17 +36,11 @@ type Config struct {
 	KimiEndpoint        string `json:"kimi_endpoint"`   // Kimi 订阅的 /coding/v1/usages，留空用默认
 	Autostart           bool   `json:"autostart"`       // 开机启动，默认 false（需用户在设置里手动开启）
 
-	// Codex 取数模式：官方订阅取百分比额度，中转站取余额（relay）。
-	// 界面上已无此设置项，仅供手改配置文件强制覆盖。
-	CodexMode string `json:"codex_mode"` // ""/auto（看供应商配置及 auth.json）| "official" | "relay"
-
-	// CodexRelayTypes 是「中转站主机名 → 类型」映射（如 {"goai.im":"sub2api"}）。
-	// base_url 始终读 ~/.codex/config.toml；按其主机名查此表决定类型，未命中则自动识别。
-	CodexRelayTypes map[string]string `json:"codex_relay_types"`
+	CustomObjects []CustomObject `json:"custom_objects,omitempty"`
 }
 
 func defaultConfig() Config {
-	return Config{Port: "AUTO", Baud: 115200, IntervalSeconds: 300, RetryIntervalSeconds: 60, PageIntervalSeconds: 4, Provider: "codex", Autostart: false}
+	return Config{OLEDBrightness: defaultOLEDBrightness, Port: "AUTO", Baud: 115200, IntervalSeconds: 300, RetryIntervalSeconds: 60, PageIntervalSeconds: 4, Provider: "codex", Autostart: false}
 }
 
 // defaultConfigPath 返回固定的配置路径 ~/.esp32-ai-usage/config.json。
@@ -61,9 +56,12 @@ func defaultConfigPath() string {
 var providerOrder = []string{"codex", "claude", "reclaude", "kimi"}
 
 // parseProviders 把配置值解析成监控对象集合：支持逗号分隔多选（如 "codex,reclaude,kimi"）；
-// "all"/"both" 等同全选；空或全部非法时回退默认 {codex}。
+// "all"/"both" 等同全选；"none" 不选内置对象；空或全部非法时回退默认 {codex}。
 func parseProviders(s string) map[string]bool {
 	set := map[string]bool{}
+	if strings.TrimSpace(s) == "none" {
+		return set
+	}
 	for _, tok := range strings.Split(s, ",") {
 		switch strings.ToLower(strings.TrimSpace(tok)) {
 		case "all", "both":
@@ -90,6 +88,9 @@ func joinProviders(set map[string]bool) string {
 		if set[p] {
 			out = append(out, p)
 		}
+	}
+	if len(out) == 0 {
+		return "none"
 	}
 	return strings.Join(out, ",")
 }
@@ -139,6 +140,7 @@ func loadConfig(path string) Config {
 		cfg.Port = "AUTO"
 	}
 	cfg.Provider = normalizeProvider(cfg.Provider)
+	cfg.OLEDBrightness = clampOLEDBrightness(cfg.OLEDBrightness)
 	return cfg
 }
 

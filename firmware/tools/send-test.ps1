@@ -3,7 +3,8 @@
 # 用法示例：
 #   .\send-test.ps1                              # 默认 COM3，pct 页
 #   .\send-test.ps1 -Kind pct -Icon codex        # Codex 百分比页
-#   .\send-test.ps1 -Kind money -V1 "$1.2" -V2 "$880"   # 中转站金额页
+#   .\send-test.ps1 -Kind money -Icon sub2api -V1 '$880' # sub2api 余额页
+#   .\send-test.ps1 -Kind money -Icon newapi -V1 '$42.5' # newapi 余额页
 #
 # 注意：host 程序占用串口时不能同时运行本脚本（串口独占）。
 
@@ -11,7 +12,7 @@ param(
   [string]$Port = "COM3",
   [ValidateSet("pct","money")]
   [string]$Kind = "pct",
-  [string]$Icon = "claude",       # pct: claude/codex；money: 货币符号
+  [string]$Icon = "claude",       # pct: claude/codex；money: sub2api/newapi
   # pct 页参数
   [int]$P1 = 94, [string]$S1 = "15:47",
   [int]$P2 = 38, [string]$S2 = "06-25 14:30",
@@ -20,7 +21,11 @@ param(
 )
 
 if ($Kind -eq "money") {
-  $frame = @{ ic = $Icon; k = "money"; l1 = "Today"; v1 = $V1; l2 = "Left"; v2 = $V2 }
+  if ($Icon -in @("sub2api", "newapi")) {
+    $frame = @{ ic = $Icon; k = "money"; l1 = "Balance"; v1 = $V1 }
+  } else {
+    $frame = @{ ic = $Icon; k = "money"; l1 = "Today"; v1 = $V1; l2 = "Left"; v2 = $V2 }
+  }
 } else {
   $frame = @{ ic = $Icon; k = "pct"; l1 = "5h"; p1 = $P1; s1 = $S1; l2 = "1w"; p2 = $P2; s2 = $S2 }
 }

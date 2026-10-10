@@ -54,7 +54,7 @@ func watchCredentials(ctx context.Context, e *Engine) {
 	// 关心的文件名（不区分大小写）：变动这些才触发刷新。
 	interesting := func(p string) bool {
 		switch strings.ToLower(filepath.Base(p)) {
-		case "auth.json", "config.toml", ".credentials.json", "settings.json", "kimi-code.json", "state.json", "ca.pem":
+		case "auth.json", ".credentials.json", "kimi-code.json", "state.json", "ca.pem":
 			return true
 		}
 		return false
@@ -89,9 +89,6 @@ func watchCredentials(ctx context.Context, e *Engine) {
 		}
 		e.log(LogInfo, "watch", "检测到凭据/配置变动（%s），立即刷新", strings.Join(changed, ", "))
 		e.Reload()
-		if e.OnCredsChange != nil {
-			e.OnCredsChange()
-		}
 	}
 
 	for {
