@@ -36,6 +36,7 @@ type Relay struct {
 //   - "pct"  ：两行百分比窗口（5h / 1w），icon = "claude"/"codex"，p1/p2 为剩余百分比(-1=ERR)，s1/s2 为重置时间。
 //   - "money"：自定义对象余额页，icon = "sub2api"/"newapi"，v1 为已格式化余额文本。
 type Frame struct {
+	Source     string `json:"-"`                    // host 显示用的服务名，不下发给固件
 	Brightness *int   `json:"brightness,omitempty"` // 可选 OLED 亮度 0–255；nil 保留设备当前值
 	Icon       string `json:"ic"`                   // pct: "claude"/"codex"；money: "sub2api"/"newapi"
 	Kind       string `json:"k"`                    // "pct" | "money"

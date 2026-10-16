@@ -11,6 +11,7 @@
   "codex_endpoint": "https://chatgpt.com/backend-api/wham/usage",
   "kimi_endpoint": "",
   "autostart": false,
+  "desktop_overlay": false,
   "custom_objects": [
     {
       "id": "example-relay",

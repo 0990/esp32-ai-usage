@@ -90,6 +90,8 @@ type Engine struct {
 	OnStatus func(string)
 	// OnActivity 在某个 provider 的工作状态聚合值变化时调用（provider: claude/codex；state 见 Act*）。
 	OnActivity func(provider string, state int)
+	// OnDisplay 与串口连接无关，每次切页/数据刷新时通知桌面显示。
+	OnDisplay func(Frame)
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -174,6 +176,19 @@ func (e *Engine) UpdateConfig(cfg Config) error {
 	return nil
 }
 
+// SetDesktopOverlay 只保存显示开关，不触发网络查询或串口重连。
+func (e *Engine) SetDesktopOverlay(enabled bool) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	cfg := e.cfg
+	cfg.DesktopOverlay = enabled
+	if err := saveConfig(e.cfgPath, cfg); err != nil {
+		return err
+	}
+	e.cfg = cfg
+	return nil
+}
+
 // Reload 非阻塞地催取数循环立即重新拉取（reload 容量 1，已有挂起信号则忽略）。
 func (e *Engine) Reload() {
 	select {
@@ -249,6 +264,7 @@ func (e *Engine) sendDisplaySettings() {
 func (e *Engine) Start(ctx context.Context) {
 	e.ctx, e.cancel = context.WithCancel(ctx)
 	e.loadCache() // 先把上次的数据装回来，首轮取数失败也有东西可显示
+	e.signalRefresh()
 	e.wg.Add(5)
 	go e.serialManagerLoop()
 	go e.serialWriterLoop()
@@ -583,9 +599,13 @@ func (e *Engine) renderCurrent(advance bool) {
 	idx := e.pageIdx
 	e.dataMu.Unlock()
 
+	f := frames[idx]
 	brightness := clampOLEDBrightness(e.Config().OLEDBrightness)
-	frames[idx].Brightness = &brightness
-	line, _ := json.Marshal(frames[idx])
+	f.Brightness = &brightness
+	if e.OnDisplay != nil {
+		e.OnDisplay(f)
+	}
+	line, _ := json.Marshal(f)
 	e.Send(line)
 }
 
@@ -614,27 +634,34 @@ func (e *Engine) buildFrames() []Frame {
 	if cfg.wants("claude") {
 		f := pctFrame("claude", e.claude, stale(e.claudeAt))
 		f.Act = claudeAct
+		f.Source = "claude"
 		frames = append(frames, f)
 	}
 	if cfg.wants("reclaude") {
 		f := pctFrame("claude", e.reclaude, stale(e.reclaudeAt))
 		f.Act = claudeAct
+		f.Source = "reclaude"
 		frames = append(frames, f)
 	}
 	if cfg.wants("codex") {
 		f := pctFrame("codex", e.codex, stale(e.codexAt))
 		f.Act = codexAct
+		f.Source = "codex"
 		frames = append(frames, f)
 	}
 	if cfg.wants("kimi") {
-		frames = append(frames, pctFrame("kimi", e.kimi, stale(e.kimiAt)))
+		f := pctFrame("kimi", e.kimi, stale(e.kimiAt))
+		f.Source = "kimi"
+		frames = append(frames, f)
 	}
 	for _, obj := range cfg.CustomObjects {
 		if !obj.Enabled {
 			continue
 		}
 		result := e.custom[obj.cacheKey()]
-		frames = append(frames, balanceFrame(obj.Type, result.Relay, stale(result.At)))
+		f := balanceFrame(obj.Type, result.Relay, stale(result.At))
+		f.Source = obj.Name
+		frames = append(frames, f)
 	}
 	return frames
 }

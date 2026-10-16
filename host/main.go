@@ -35,6 +35,7 @@ type Config struct {
 	CodexEndpoint       string `json:"codex_endpoint"`  // 官方订阅的 wham/usage，留空用默认
 	KimiEndpoint        string `json:"kimi_endpoint"`   // Kimi 订阅的 /coding/v1/usages，留空用默认
 	Autostart           bool   `json:"autostart"`       // 开机启动，默认 false（需用户在设置里手动开启）
+	DesktopOverlay      bool   `json:"desktop_overlay"` // Windows 右上角额度悬浮窗，默认关闭
 
 	CustomObjects []CustomObject `json:"custom_objects,omitempty"`
 }

@@ -33,13 +33,16 @@ type GUI struct {
 	win    fyne.Window
 	engine *Engine
 
-	logLines  []string
-	logLabel  *widget.Label
-	logScroll *container.Scroll
-	status    *widget.Label  // 常驻底部的串口状态
-	actLabel  *widget.Label  // 常驻底部右侧：Claude / Codex 的工作状态
-	actState  map[string]int // provider -> Act*（OnActivity 回调更新）
-
+	logLines     []string
+	logLabel     *widget.Label
+	logScroll    *container.Scroll
+	status       *widget.Label  // 常驻底部的串口状态
+	actLabel     *widget.Label  // 常驻底部右侧：Claude / Codex 的工作状态
+	actState     map[string]int // provider -> Act*（OnActivity 回调更新）
+	overlay      *desktopOverlay
+	overlayCheck *widget.Check
+	overlayItem  *fyne.MenuItem
+	trayMenu     *fyne.Menu
 }
 
 // RunGUI 构建界面、启动引擎并进入事件循环（阻塞直到退出）。
@@ -56,6 +59,13 @@ func RunGUI(cfg Config, cfgPath string, ln net.Listener) {
 	g.engine.OnLog = func(e LogEntry) { fyne.Do(func() { g.appendLog(e) }) }
 	g.engine.OnStatus = func(s string) { fyne.Do(func() { g.status.SetText(s) }) }
 	g.engine.OnActivity = func(p string, s int) { fyne.Do(func() { g.setActivity(p, s) }) }
+	g.engine.OnDisplay = func(f Frame) {
+		fyne.Do(func() {
+			if g.overlay != nil {
+				g.overlay.update(f)
+			}
+		})
+	}
 
 	// 单实例：后启动的实例来敲门时，把本窗口拉到前台（feature 3）。
 	if ln != nil {
@@ -69,6 +79,9 @@ func RunGUI(cfg Config, cfgPath string, ln net.Listener) {
 	g.fitWindowHeight()
 
 	g.setupTray(icon)
+	a.Lifecycle().SetOnStarted(func() {
+		fyne.Do(func() { g.applyDesktopOverlay() })
+	})
 	w.SetCloseIntercept(func() { w.Hide() }) // 关窗 → 收进托盘，不退出
 
 	// 首次运行：创建配置文件（开机启动默认关闭，setAutostart(false) 只是确保注册表无残留）。
@@ -253,6 +266,12 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 
 	autostartCheck := widget.NewCheck("开机时自动启动本程序", nil)
 	autostartCheck.SetChecked(cfg.Autostart)
+	g.overlayCheck = widget.NewCheck("在桌面右上角显示额度（立即生效）", g.setDesktopOverlay)
+	g.overlayCheck.Disable()
+	if desktopOverlaySupported {
+		g.overlayCheck.Enable()
+	}
+	g.overlayCheck.SetChecked(cfg.DesktopOverlay)
 
 	// 顶部只放常用项；其余折叠进「更多」。
 	fetchNowBtn := widget.NewButton("立即刷新使用量", func() {
@@ -300,6 +319,7 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 		widget.NewFormItem("监控对象", monitorObjects),
 		widget.NewFormItem("OLED 亮度", brightnessRow),
 		widget.NewFormItem("开机启动", autostartCheck),
+		widget.NewFormItem("桌面悬浮窗", g.overlayCheck),
 		widget.NewFormItem("运行标志钩子", hooksRow),
 	)
 	moreForm := widget.NewForm(
@@ -376,6 +396,7 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 			CustomObjects:        append([]CustomObject(nil), customObjects...),
 			KimiEndpoint:         old.KimiEndpoint,
 			Autostart:            autostartCheck.Checked,
+			DesktopOverlay:       old.DesktopOverlay,
 		}
 		if newCfg.Port == "" {
 			newCfg.Port = "AUTO"
@@ -452,12 +473,19 @@ func (g *GUI) setupTray(icon fyne.Resource) {
 	if !ok {
 		return
 	}
+	g.overlayItem = fyne.NewMenuItem("显示桌面额度悬浮窗", func() {
+		g.setDesktopOverlay(!g.engine.Config().DesktopOverlay)
+	})
+	g.overlayItem.Checked = g.engine.Config().DesktopOverlay
+	g.overlayItem.Disabled = !desktopOverlaySupported
 	menu := fyne.NewMenu("ESP32 AI 额度表",
 		fyne.NewMenuItem("显示窗口", func() { g.win.Show() }),
 		fyne.NewMenuItem("隐藏窗口", func() { g.win.Hide() }),
+		g.overlayItem,
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("退出", func() { g.quit() }),
 	)
+	g.trayMenu = menu
 	desk.SetSystemTrayMenu(menu) // 先建托盘
 	desk.SetSystemTrayIcon(icon) // 再设图标
 	// 关联主窗口：点击/双击托盘图标 → 显示主窗口（右键仍弹菜单）。
