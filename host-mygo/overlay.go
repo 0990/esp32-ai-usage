@@ -36,7 +36,13 @@ func (g *GUI) applyOverlay() {
 		d := overlayDesignFor(c.OverlayStyle)
 		o.win = mygo.NewWindow(mygo.WindowOptions{Title: "AI 额度悬浮窗 · MyGo", Width: c.OverlayWidth, Height: c.OverlayHeight, MinWidth: 264, MinHeight: int(d.minHeight), BackgroundColor: fmt.Sprintf("#%02x%02x%02x", d.background.R, d.background.G, d.background.B), Hidden: true, Frameless: true, SkipTaskbar: !g.preview, DisableMinimize: true, DisableMaximize: true, Content: ui.View(o.view)})
 		g.overlay = o
-		o.win.OnClose(func(e *mygo.CloseEvent) { e.PreventDefault(); g.setOverlayEnabled(false) })
+		o.win.OnClose(func(e *mygo.CloseEvent) {
+			if g.quitting {
+				return
+			}
+			e.PreventDefault()
+			g.setOverlayEnabled(false)
+		})
 		o.win.OnMove(o.rememberBounds)
 		o.win.OnResize(o.rememberBounds)
 		o.applying = false

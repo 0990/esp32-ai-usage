@@ -40,6 +40,7 @@ type GUI struct {
 	tray              *mygo.Tray
 	trayOverlay       *mygo.MenuItem
 	displaySync       bool
+	quitting          bool
 }
 
 func newGUI(cfg Config, path string, preview bool) *GUI {
@@ -50,10 +51,18 @@ func RunGUI(cfg Config, path string, ln net.Listener, preview bool) {
 	g := newGUI(cfg, path, preview)
 	mygo.App.OnWindowAllClosed(func() {})
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
+		// App.Quit also calls each window's OnClose handler. Let those
+		// closes proceed instead of treating them as hide-to-tray actions.
+		g.quitting = true
 		if g.overlay != nil {
 			g.overlay.flushBounds()
 		}
-		g.engine.Stop()
+	})
+	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		if g.tray != nil {
+			g.tray.Destroy()
+			g.tray = nil
+		}
 	})
 	mygo.App.WhenReady(func() {
 		g.win = mygo.NewWindow(mygo.WindowOptions{Title: "ESP32 AI 额度表 · MyGo", Width: 820, Height: 820, MinWidth: 660, MinHeight: 560, Hidden: true, Content: ui.View(g.view)})
@@ -62,6 +71,9 @@ func RunGUI(cfg Config, path string, ln net.Listener, preview bool) {
 		}
 		g.setupTray()
 		g.win.OnClose(func(e *mygo.CloseEvent) {
+			if g.quitting {
+				return
+			}
 			if g.tray != nil {
 				e.PreventDefault()
 				g.win.Hide()
