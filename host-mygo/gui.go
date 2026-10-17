@@ -254,7 +254,7 @@ func (g *GUI) advancedView(c *ui.Context) {
 			label string
 			value *string
 			hint  string
-		}{{"串口 Port", &g.draft.Port, "AUTO 或 COM5"}, {"波特率 Baud", &g.draft.baud, "115200"}, {"刷新间隔（成功，秒）", &g.draft.interval, "300"}, {"重试间隔（失败，秒）", &g.draft.retry, "60"}, {"轮播间隔（秒）", &g.draft.page, "4"}, {"代理 Proxy", &g.draft.Proxy, "留空使用 HTTPS_PROXY"}, {"Claude 端点", &g.draft.ClaudeEndPoint, "留空使用默认端点"}, {"Codex 端点", &g.draft.CodexEndpoint, defaultCodexEndpoint}, {"Kimi 端点", &g.draft.KimiEndpoint, "留空使用默认端点"}}
+		}{{"串口 Port", &g.draft.Port, "AUTO 或 COM5"}, {"波特率 Baud", &g.draft.baud, "115200"}, {"刷新间隔（成功，秒）", &g.draft.interval, "300"}, {"重试间隔（失败，秒）", &g.draft.retry, "60"}, {"轮播间隔（秒）", &g.draft.page, "4"}, {"代理 Proxy", &g.draft.Proxy, "留空使用 HTTPS_PROXY"}}
 		for _, f := range fields {
 			ui.Field(c, f.label, func() { ui.TextInput(c.Key("field-"+f.label), f.value).Placeholder(f.hint) })
 		}

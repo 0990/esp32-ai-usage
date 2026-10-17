@@ -193,14 +193,6 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 	proxyEntry.SetText(cfg.Proxy)
 	proxyEntry.SetPlaceHolder("如 http://127.0.0.1:7890，留空用 HTTPS_PROXY")
 
-	claudeEntry := widget.NewEntry()
-	claudeEntry.SetText(cfg.ClaudeEndPoint)
-	claudeEntry.SetPlaceHolder("留空走 ANTHROPIC_BASE_URL（中转地址）")
-
-	codexEntry := widget.NewEntry()
-	codexEntry.SetText(cfg.CodexEndpoint)
-	codexEntry.SetPlaceHolder(defaultCodexEndpoint)
-
 	customObjects := append([]CustomObject(nil), cfg.CustomObjects...)
 	customList := container.NewVBox()
 	var rebuildCustom func()
@@ -399,8 +391,6 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 		widget.NewFormItem("重试间隔(失败,秒)", retryIntervalEntry),
 		widget.NewFormItem("轮播间隔(秒)", pageIntervalEntry),
 		widget.NewFormItem("代理 Proxy", proxyEntry),
-		widget.NewFormItem("Claude 端点", claudeEntry),
-		widget.NewFormItem("Codex 端点", codexEntry),
 	)
 	// 「更多」不用 Accordion：展开时窗口直接变长（不出现滚动条），收起时缩回。
 	moreForm.Hide()
@@ -461,8 +451,8 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 			PageIntervalSeconds:  pageInterval,
 			Provider:             joinProviders(providers),
 			Proxy:                strings.TrimSpace(proxyEntry.Text),
-			ClaudeEndPoint:       strings.TrimSpace(claudeEntry.Text),
-			CodexEndpoint:        strings.TrimSpace(codexEntry.Text),
+			ClaudeEndPoint:       old.ClaudeEndPoint,
+			CodexEndpoint:        old.CodexEndpoint,
 			CustomObjects:        append([]CustomObject(nil), customObjects...),
 			KimiEndpoint:         old.KimiEndpoint,
 			Autostart:            autostartCheck.Checked,
