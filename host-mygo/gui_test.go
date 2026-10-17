@@ -101,6 +101,17 @@ func TestNativeStyleAndLayerControls(t *testing.T) {
 	}
 	click(t, tt, "悬浮窗样式")
 	click(t, tt, "极简窄条")
+	for _, style := range []string{"horizontal", "vertical"} {
+		click(t, tt, "悬浮窗样式")
+		d := overlayDesignFor(style)
+		if tt.HasText("口袋数字") {
+			t.Fatal("removed style is still available in the picker")
+		}
+		click(t, tt, d.name)
+		if c := loadConfig(g.engine.cfgPath); c.OverlayStyle != style || c.OverlayWidth != int(d.width) || c.OverlayHeight != int(d.height) {
+			t.Fatal("compact style selection did not persist its dimensions")
+		}
+	}
 	if len(g.engine.reload) != 0 {
 		t.Fatal("display controls must not trigger network requests")
 	}
@@ -117,26 +128,48 @@ func TestNativeOverlayVariantsAndPinState(t *testing.T) {
 			o := &nativeOverlay{g: g, cfg: cfg, hasFrame: true, frame: Frame{Source: "codex", Kind: "pct", P1: 100, S1: "15:17", P2: 0, S2: "10-23 14:08"}}
 			g.overlay = o
 			tt := ui.NewTester(o.view, cfg.OverlayWidth, cfg.OverlayHeight)
-			if !tt.HasText("Codex") || !tt.HasText("100") || !tt.HasText("0") {
+			if (!compactOverlayStyle(style) && !tt.HasText("Codex")) || !tt.HasText("100") || !tt.HasText("0") {
 				t.Fatalf("quota data missing: %q", tt.Texts())
 			}
-			click(t, tt, "当前置顶，点击置底")
-			if g.engine.Config().OverlayLayer != "bottom" {
-				t.Fatal("pin did not switch to bottom")
-			}
-			click(t, tt, "当前置底，点击置顶")
-			if g.engine.Config().OverlayLayer != "top" {
-				t.Fatal("pin did not immediately expose the new state")
+			if !compactOverlayStyle(style) {
+				click(t, tt, "当前置顶，点击置底")
+				if g.engine.Config().OverlayLayer != "bottom" {
+					t.Fatal("pin did not switch to bottom")
+				}
+				click(t, tt, "当前置底，点击置顶")
+				if g.engine.Config().OverlayLayer != "top" {
+					t.Fatal("pin did not immediately expose the new state")
+				}
+			} else {
+				for _, layer := range []struct{ label, value string }{{"始终置底", "bottom"}, {"始终置顶", "top"}} {
+					if err := tt.RightClick("拖动悬浮窗"); err != nil {
+						t.Fatal(err)
+					}
+					if !strings.Contains(strings.Join(tt.Menu(), "\n"), "重置 10-23 14:08") {
+						t.Fatal("compact context menu is missing reset details")
+					}
+					if err := tt.ChooseMenuItem(layer.label); err != nil {
+						t.Fatal(err)
+					}
+					tt.Frame()
+					if g.engine.Config().OverlayLayer != layer.value {
+						t.Fatal("compact menu layer action did not persist")
+					}
+				}
 			}
 			o.frame = Frame{Source: "station", Kind: "money", L1: "Balance", V1: "$12"}
 			tt.Frame()
-			if !tt.HasText("station") || !tt.HasText("$12") || tt.HasText("100") {
+			if (!compactOverlayStyle(style) && !tt.HasText("station")) || !tt.HasText("$12") || tt.HasText("100") {
 				t.Fatal("relay page kept stale quota values")
 			}
 			o.frame = Frame{Source: "codex", Kind: "pct", P1: -1, P2: -1, Old: true}
 			tt.SetSize(cfg.OverlayWidth, cfg.OverlayHeight+18)
 			tt.Frame()
-			if !tt.HasText("数据已过期 · 正在重试更新") {
+			if compactOverlayStyle(style) {
+				if o.minHeight() != int(overlayDesignFor(style).minHeight) || !strings.Contains(strings.Join(o.compactDetails(), "\n"), "数据已过期") {
+					t.Fatal("compact styles must keep stale details without expanding the window")
+				}
+			} else if !tt.HasText("数据已过期 · 正在重试更新") {
 				t.Fatal("stale data warning missing")
 			}
 		})

@@ -4,6 +4,8 @@ package main
 
 import "github.com/egoist/mygo"
 
+func setNativeOverlayFrame(*mygo.Window, bool) {}
+
 func nativeOverlayPosition(w *mygo.Window) (int32, int32, error) {
 	x, y := w.Position()
 	return int32(x), int32(y), nil

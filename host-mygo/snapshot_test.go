@@ -44,5 +44,19 @@ func TestNativeRenderSnapshots(t *testing.T) {
 		o := &nativeOverlay{g: g, cfg: cfg, frame: Frame{Source: "codex", Kind: "pct", P1: 78, P2: 69, S1: "15:17", S2: "10-23 14:08"}, hasFrame: true}
 		g.overlay = o
 		save("overlay-"+style, ui.NewTester(o.view, cfg.OverlayWidth, cfg.OverlayHeight))
+		if compactOverlayStyle(style) {
+			for _, state := range []struct {
+				name  string
+				frame Frame
+			}{
+				{"limits", Frame{Source: "reclaude", Kind: "pct", P1: 100, P2: 0, S1: "15:17", S2: "10-23 14:08"}},
+				{"balance", Frame{Source: "我的中转站", Kind: "money", L1: "Balance", V1: "$12.8"}},
+				{"stale", Frame{Source: "codex", Kind: "pct", P1: 78, P2: 69, Old: true}},
+				{"failed", Frame{Source: "codex", Kind: "pct", P1: -1, P2: -1}},
+			} {
+				o.frame = state.frame
+				save("overlay-"+style+"-"+state.name, ui.NewTester(o.view, cfg.OverlayWidth, cfg.OverlayHeight))
+			}
+		}
 	}
 }

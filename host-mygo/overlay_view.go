@@ -37,6 +37,10 @@ func (o *nativeOverlay) view(c *ui.Context) {
 	t.Surface = d.badge
 	c.SetTheme(&t)
 	c.Root().Background(d.background)
+	if compactOverlayStyle(o.cfg.OverlayStyle) {
+		o.compactView(c, d)
+		return
+	}
 	w, h := c.Size()
 	padding, headerY := float32(17), float32(14)
 	if o.cfg.OverlayStyle == "obsidian" {

@@ -28,6 +28,21 @@ var overlayDwmAttribute = overlayDwm.NewProc("DwmSetWindowAttribute")
 
 type overlayRect struct{ Left, Top, Right, Bottom int32 }
 
+func setNativeOverlayFrame(w *mygo.Window, compact bool) {
+	index := int32(-16) // GWL_STYLE
+	style, _, _ := overlayGetStyle.Call(w.NativeHandle(), uintptr(index))
+	next := (style &^ 0x80000000) | 0x00cc0000 // Restore an overlapped, resizable system-menu window.
+	if compact {
+		// Invisible resize borders otherwise consume most of a 44px-wide window,
+		// and Windows' caption minimum prevents a 24px-high strip.
+		next = (style &^ 0x00cf0000) | 0x80000000 // WS_POPUP, without WS_OVERLAPPEDWINDOW.
+	}
+	if next != style {
+		overlaySetStyle.Call(w.NativeHandle(), uintptr(index), next)
+		overlaySetPos.Call(w.NativeHandle(), 0, 0, 0, 0, 0, 0x0037) // FRAMECHANGED | NOSIZE | NOMOVE | NOZORDER | NOACTIVATE
+	}
+}
+
 func nativeOverlayPosition(w *mygo.Window) (int32, int32, error) {
 	var r overlayRect
 	if n, _, err := overlayGetRect.Call(w.NativeHandle(), uintptr(unsafe.Pointer(&r))); n == 0 {

@@ -281,7 +281,7 @@ func (g *GUI) overlaySettings(c *ui.Context) {
 		for _, f := range []struct {
 			label            string
 			value, low, high int
-		}{{"宽度", live.OverlayWidth, 264, 1000}, {"高度", live.OverlayHeight, int(overlayDesignFor(live.OverlayStyle).minHeight), 800}, {"不透明度", live.OverlayOpacity, 40, 100}} {
+		}{{"宽度", live.OverlayWidth, int(overlayDesignFor(live.OverlayStyle).minWidth), 1000}, {"高度", live.OverlayHeight, int(overlayDesignFor(live.OverlayStyle).minHeight), 800}, {"不透明度", live.OverlayOpacity, 40, 100}} {
 			value := float64(f.value)
 			name := f.label
 			ui.Row(c.Key("overlay-row-" + name)).Gap(10).Children(func() {
@@ -315,7 +315,7 @@ func (g *GUI) overlaySettings(c *ui.Context) {
 			})
 		})
 		ui.Row(c).Wrap().Gap(8).Children(func() {
-			ui.Text(c, "拖动顶部移动，边缘调整宽高").FontSize(12).TextColor(c.Theme().TextMuted)
+			ui.Text(c, "拖动卡片移动，边缘调整宽高").FontSize(12).TextColor(c.Theme().TextMuted)
 			ui.Button(c.Key("reset-position"), "回到右上角").OnClick(g.resetOverlayPosition)
 		})
 	})

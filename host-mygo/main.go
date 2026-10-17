@@ -38,7 +38,7 @@ type Config struct {
 	DesktopOverlay      bool   `json:"desktop_overlay"` // Windows 右上角额度悬浮窗，默认关闭
 	OverlayScale        int    `json:"overlay_scale"`   // 悬浮窗大小百分比，默认 100
 	OverlayLayer        string `json:"overlay_layer"`   // top（置顶）或 bottom（置底）
-	OverlayStyle        string `json:"overlay_style"`   // paper / obsidian / strip（默认）
+	OverlayStyle        string `json:"overlay_style"`   // paper / obsidian / strip / horizontal（默认）/ vertical
 	OverlayWidth        int    `json:"overlay_width"`
 	OverlayHeight       int    `json:"overlay_height"`
 	OverlayOpacity      int    `json:"overlay_opacity"` // 整体不透明度，40–100，默认 100
@@ -50,7 +50,8 @@ type Config struct {
 }
 
 func defaultConfig() Config {
-	return Config{OLEDBrightness: defaultOLEDBrightness, Port: "AUTO", Baud: 115200, IntervalSeconds: 300, RetryIntervalSeconds: 60, PageIntervalSeconds: 4, Provider: "codex", Autostart: false, OverlayScale: 100, OverlayLayer: "top", OverlayStyle: defaultOverlayStyle, OverlayWidth: 330, OverlayHeight: 132, OverlayOpacity: 100}
+	d := overlayDesignFor(defaultOverlayStyle)
+	return Config{OLEDBrightness: defaultOLEDBrightness, Port: "AUTO", Baud: 115200, IntervalSeconds: 300, RetryIntervalSeconds: 60, PageIntervalSeconds: 4, Provider: "codex", Autostart: false, OverlayScale: 100, OverlayLayer: "top", OverlayStyle: defaultOverlayStyle, OverlayWidth: int(d.width), OverlayHeight: int(d.height), OverlayOpacity: 100}
 }
 
 // defaultConfigPath 返回独立配置路径 ~/.esp32-ai-usage-mygo/config.json。
@@ -136,13 +137,23 @@ func loadConfig(path string) Config {
 	_ = json.Unmarshal(raw, &cfg)
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(raw, &fields) == nil {
-		if _, exists := fields["overlay_style"]; !exists {
-			// 旧透明窗首次升级为极简窄条，保留位置、层级与监控配置。
+		if _, exists := fields["overlay_style"]; !exists || cfg.OverlayStyle == "nano" {
+			// 无样式的旧配置和已删除的口袋数字使用新默认，保留位置、层级与监控配置。
 			cfg.OverlayStyle = defaultOverlayStyle
 			cfg.OverlayScale = 100
-			cfg.OverlayWidth = 330
-			cfg.OverlayHeight = 132
-			cfg.OverlayOpacity = 100
+			cfg.OverlayWidth = 0
+			cfg.OverlayHeight = 0
+			if !exists {
+				cfg.OverlayOpacity = 100
+			}
+		} else {
+			// 显式选择旧样式但省略尺寸时，使用该样式的默认尺寸。
+			if _, exists := fields["overlay_width"]; !exists {
+				cfg.OverlayWidth = 0
+			}
+			if _, exists := fields["overlay_height"]; !exists {
+				cfg.OverlayHeight = 0
+			}
 		}
 	}
 	if cfg.Baud == 0 {

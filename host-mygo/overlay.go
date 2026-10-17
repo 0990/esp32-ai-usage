@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -20,6 +21,7 @@ type nativeOverlay struct {
 	boundsPending bool
 	boundsDue     time.Time
 	positionWarn  bool
+	tip           overlayTooltip
 }
 
 func (g *GUI) applyOverlay() {
@@ -27,6 +29,7 @@ func (g *GUI) applyOverlay() {
 	if !c.DesktopOverlay {
 		if g.overlay != nil && g.overlay.win != nil {
 			g.overlay.flushBounds()
+			g.overlay.tip.destroy()
 			g.overlay.win.Hide()
 		}
 		return
@@ -34,7 +37,7 @@ func (g *GUI) applyOverlay() {
 	if g.overlay == nil {
 		o := &nativeOverlay{g: g, cfg: c, applying: true}
 		d := overlayDesignFor(c.OverlayStyle)
-		o.win = mygo.NewWindow(mygo.WindowOptions{Title: "AI 额度悬浮窗 · MyGo", Width: c.OverlayWidth, Height: c.OverlayHeight, MinWidth: 264, MinHeight: int(d.minHeight), BackgroundColor: fmt.Sprintf("#%02x%02x%02x", d.background.R, d.background.G, d.background.B), Hidden: true, Frameless: true, SkipTaskbar: !g.preview, DisableMinimize: true, DisableMaximize: true, Content: ui.View(o.view)})
+		o.win = mygo.NewWindow(mygo.WindowOptions{Title: "AI 额度悬浮窗 · MyGo", Width: c.OverlayWidth, Height: c.OverlayHeight, MinWidth: int(d.minWidth), MinHeight: int(d.minHeight), BackgroundColor: fmt.Sprintf("#%02x%02x%02x", d.background.R, d.background.G, d.background.B), Hidden: true, Frameless: true, SkipTaskbar: !g.preview, DisableMinimize: true, DisableMaximize: true, Content: ui.View(o.view)})
 		g.overlay = o
 		o.win.OnClose(func(e *mygo.CloseEvent) {
 			if g.quitting {
@@ -45,6 +48,7 @@ func (g *GUI) applyOverlay() {
 		})
 		o.win.OnMove(o.rememberBounds)
 		o.win.OnResize(o.rememberBounds)
+		o.win.OnClosed(o.tip.destroy)
 		o.applying = false
 	}
 	g.overlay.apply(c, true)
@@ -75,6 +79,7 @@ func (g *GUI) overlayChanged(err error) {
 		if c.DesktopOverlay {
 			g.applyOverlay()
 		} else if g.overlay != nil {
+			g.overlay.tip.destroy()
 			g.overlay.win.Hide()
 		}
 		g.win.Invalidate()
@@ -115,6 +120,9 @@ func (g *GUI) resetOverlayPosition() { g.overlayChanged(g.engine.SetOverlayPosit
 
 func (o *nativeOverlay) minHeight() int {
 	h := int(overlayDesignFor(o.cfg.OverlayStyle).minHeight)
+	if compactOverlayStyle(o.cfg.OverlayStyle) {
+		return h // 详情和状态不改变极小布局的尺寸。
+	}
 	if o.hasFrame && o.frame.Kind == "money" && o.frame.L1 != "Balance" {
 		h = max(h, 160)
 	}
@@ -132,7 +140,8 @@ func (o *nativeOverlay) apply(cfg Config, reposition bool) {
 	}
 	o.cfg = cfg
 	o.boundsPending = false
-	o.win.SetMinimumSize(264, o.minHeight())
+	setNativeOverlayFrame(o.win, compactOverlayStyle(cfg.OverlayStyle))
+	o.win.SetMinimumSize(int(overlayDesignFor(cfg.OverlayStyle).minWidth), o.minHeight())
 	w, h := o.win.Size()
 	if w != cfg.OverlayWidth || h != max(cfg.OverlayHeight, o.minHeight()) {
 		o.win.SetSize(cfg.OverlayWidth, max(cfg.OverlayHeight, o.minHeight()))
@@ -140,6 +149,7 @@ func (o *nativeOverlay) apply(cfg Config, reposition bool) {
 	o.win.SetOpacity(float64(cfg.OverlayOpacity) / 100)
 	o.win.SetAlwaysOnTop(cfg.OverlayLayer == "top")
 	o.position(reposition)
+	o.updateTooltip()
 	o.win.Invalidate()
 }
 func (o *nativeOverlay) position(reposition bool) {
@@ -202,11 +212,46 @@ func (o *nativeOverlay) popupMenu() {
 	if o.win == nil {
 		return
 	}
+	mygo.NewMenu(o.menuItems()).Popup(o.win)
+}
+
+func (o *nativeOverlay) menuItems() []*mygo.MenuItem {
 	items := []*mygo.MenuItem{}
+	if compactOverlayStyle(o.cfg.OverlayStyle) {
+		for _, detail := range o.compactDetails() {
+			items = append(items, &mygo.MenuItem{Label: detail, Disabled: true})
+		}
+		items = append(items, mygo.Separator())
+	}
 	for i, id := range overlayStyleIDs {
 		style := id
 		items = append(items, &mygo.MenuItem{Label: overlayStyleNames[i], Type: mygo.MenuItemRadio, Checked: o.cfg.OverlayStyle == style, Click: func(*mygo.MenuItem, *mygo.Window) { o.g.setOverlayStyle(style) }})
 	}
-	items = append(items, mygo.Separator(), &mygo.MenuItem{Label: "始终置顶", Type: mygo.MenuItemRadio, Checked: o.cfg.OverlayLayer == "top", Click: func(*mygo.MenuItem, *mygo.Window) { o.g.setOverlayLayer("top") }}, &mygo.MenuItem{Label: "始终置底", Type: mygo.MenuItemRadio, Checked: o.cfg.OverlayLayer == "bottom", Click: func(*mygo.MenuItem, *mygo.Window) { o.g.setOverlayLayer("bottom") }}, mygo.Separator(), &mygo.MenuItem{Label: "回到右上角", Click: func(*mygo.MenuItem, *mygo.Window) { o.g.resetOverlayPosition() }})
-	mygo.NewMenu(items).Popup(o.win)
+	items = append(items, mygo.Separator(), &mygo.MenuItem{Label: "始终置顶", Type: mygo.MenuItemRadio, Checked: o.cfg.OverlayLayer == "top", Click: func(*mygo.MenuItem, *mygo.Window) { o.g.setOverlayLayer("top") }}, &mygo.MenuItem{Label: "始终置底", Type: mygo.MenuItemRadio, Checked: o.cfg.OverlayLayer == "bottom", Click: func(*mygo.MenuItem, *mygo.Window) { o.g.setOverlayLayer("bottom") }}, mygo.Separator(), &mygo.MenuItem{Label: "回到右上角", Click: func(*mygo.MenuItem, *mygo.Window) { o.g.resetOverlayPosition() }}, &mygo.MenuItem{Label: "关闭悬浮窗", Click: func(*mygo.MenuItem, *mygo.Window) { o.g.setOverlayEnabled(false) }})
+	return items
+}
+
+// The UI context menu uses the same actions as the older styles' menu button.
+func (o *nativeOverlay) contextMenu(m *ui.Menu) {
+	for _, item := range o.menuItems() {
+		if item.Type == mygo.MenuItemSeparator {
+			m.Separator()
+			continue
+		}
+		entry := m.Item(item.Label).Disabled(item.Disabled)
+		if item.Type == mygo.MenuItemRadio {
+			entry.Checked(item.Checked)
+		}
+		if entry.Chosen() && item.Click != nil {
+			item.Click(item, o.win)
+		}
+	}
+}
+
+func (o *nativeOverlay) updateTooltip() {
+	if compactOverlayStyle(o.cfg.OverlayStyle) {
+		o.tip.update(o.win, strings.Join(o.compactDetails(), "\n"))
+	} else {
+		o.tip.destroy()
+	}
 }
