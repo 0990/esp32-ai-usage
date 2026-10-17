@@ -53,7 +53,8 @@ func (o *nativeOverlay) view(c *ui.Context) {
 			e.TextAlign(ui.End)
 		}
 	}
-	ui.Box(c).Fill().Background(d.background).Children(func() {
+	// Let passive content share the card's drag handle; child buttons keep their own input.
+	ui.Box(c.Key("drag-region")).Fill().Background(d.background).DragWindow().Cursor(ui.CursorGrab).Label("拖动悬浮窗").Children(func() {
 		name := "AI 额度"
 		if o.hasFrame {
 			name = overlayTitle(o.frame.Source)
@@ -71,7 +72,6 @@ func (o *nativeOverlay) view(c *ui.Context) {
 			})
 			text("source", name, padding+31, headerY+3, w-padding*2-104, 13, d.text, false)
 		}
-		ui.Box(c.Key("drag-region")).Absolute().Left(padding).Top(headerY).Size(max(20, w-padding*2-72), 23).DragWindow().Cursor(ui.CursorGrab).Label("拖动悬浮窗")
 		icon, label, face := pinOffIcon, "当前置底，点击置顶", ui.Transparent
 		if o.cfg.OverlayLayer == "top" {
 			icon = pinIcon
