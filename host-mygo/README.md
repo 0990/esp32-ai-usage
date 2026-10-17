@@ -1,0 +1,58 @@
+# ESP32 AI 额度表 · MyGo 原生 UI
+
+与 `../host` 并列的独立版本。使用 **MyGo v0.5.5 原生 UI**，Windows 通过 Direct3D 11 绘制；没有 HTML、JavaScript、WebView2 或 Fyne 依赖。
+
+## 构建与运行
+
+需要 Go **1.27.1+**，不需要 MinGW、Bun、Node.js 或 CGO。
+
+```powershell
+cd host-mygo
+$env:CGO_ENABLED = '0'
+go test ./...
+go build -trimpath -ldflags '-s -w -H=windowsgui' -o bin/esp32-ai-usage-mygo.exe .
+.\bin\esp32-ai-usage-mygo.exe
+```
+
+也可双击 `build.bat` 构建。可执行文件支持第一个位置参数指定配置文件：
+
+```powershell
+.\bin\esp32-ai-usage-mygo.exe D:\configs\usage.json
+```
+
+## 已实现的对应功能
+
+- Codex、Claude、ReClaude、Kimi 多选，按间隔轮播；凭据读取、API 查询、失败重试及本地缓存。
+- 自定义 sub2api / newapi 余额监控：新增、编辑、删除、多选、名称与输入校验。编辑保存前均为草稿。
+- USB 串口自动发现、断线重连、OLED 亮度、JSON 测试命令。
+- 三款可切换悬浮窗：雾白卡片、曜石仪表、极简窄条；**默认极简窄条**。
+- 悬浮窗独立宽高、不透明度、拖动移动、原生窗口边缘缩放、尺寸/位置保存、回到右上角。
+- 置顶 / 置底，图钉状态即时切换；悬浮窗菜单和主界面使用同一份显示设置。
+- 设置、测试命令、活动日志三个页签；日志有 500 行上限，展示串口与 CLI 工作状态。
+- 单实例唤起、关窗隐藏到托盘、托盘左键显示/右键菜单、开机启动与工作状态钩子管理。
+
+## 与 Fyne 版本并存
+
+默认配置为 `%USERPROFILE%\.esp32-ai-usage-mygo\config.json`，日志及数据缓存也位于此独立目录。
+
+首次默认启动时，如果原版配置存在，会自动从 `%USERPROFILE%\.esp32-ai-usage\config.json` 导入设置；之后两个版本分别保存。导入时新版本的开机启动默认关闭，以免同时自启。OAuth 凭据仍读取客户端原本的位置，不复制或打印凭据。
+
+两版的可执行文件、配置和自启注册表项独立。**同一 ESP32 串口一次只能由一个版本连接**，比较时请先从托盘退出另一个版本。
+
+MyGo 版单实例端口依次尝试 `42737`、`32737`、`22737`；工作状态回调使用 `127.0.0.1:42736`，避开本机 Windows 保留的 `52736` 端口。点击「安装」会将该工具的 Claude / Codex 钩子更新为本版本的回调地址；切回旧版时可在旧版重新安装钩子。
+
+## 验证与预览
+
+```powershell
+go test ./...
+go vet ./...
+.\bin\esp32-ai-usage-mygo.exe --preview D:\temp\usage-preview.json
+```
+
+`--preview` 不启动网络查询、串口、凭据监听，也不安装钩子或修改自启；使用指定配置，可在其中设置 `"desktop_overlay": true` 显示固定的示例额度。普通设置和样式调整只保存到传入的预览配置。预览悬浮窗会显示在任务切换器中，便于独立检查；正常运行使用不抢焦点的工具窗。预览仍使用自己的单实例通道，应先退出正在运行的 MyGo 版。
+
+原生 UI 测试通过 `ui.NewTester` 在无窗口环境验证页签、草稿保存、校验、样式、图钉和显示状态。可用 `MYGO_SNAPSHOT_DIR` 环境变量运行截图测试，导出原生视图渲染结果。
+
+本机 Windows 11 实测：连接 COM17、查询真实 Codex 额度并显示悬浮窗时，12 秒空闲采样的进程工作集约 **92.4 MiB**，CPU 约 **0.22%**（按整机逻辑处理器数折算），私有提交量约 144.3 MiB，无子进程。此前 Fyne 版工作集约 237–239 MiB。采样时间和窗口状态不同，这些数据仅供本机短时参考，不代表长期峰值。
+
+后台 Go 文件和对应测试从 `../host` 当前版本移植，保持协议与业务行为一致。MyGo 版的 `gui.go`、`settings_model.go`、`overlay*.go` 为独立原生实现；以后修改后台时需同步两目录并运行各自测试。

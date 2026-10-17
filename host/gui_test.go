@@ -86,3 +86,54 @@ func TestCustomSettingsDraft(t *testing.T) {
 		}
 	}
 }
+
+func TestOverlayStyleControlsApplyImmediately(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := defaultConfig()
+	cfg.OverlayX = -300
+	cfg.OverlayPositionSet = true
+	g := &GUI{app: a, win: a.NewWindow("settings"), engine: NewEngine(cfg, path)}
+	g.win.SetContent(g.buildSettingsTab())
+	if g.overlayStyleSelect.Selected != "极简窄条" {
+		t.Fatal("settings must default to minimal strip")
+	}
+	for i, name := range overlayStyleNames {
+		g.overlayStyleSelect.SetSelected(name)
+		loaded := loadConfig(path)
+		d := overlayDesignFor(overlayStyleIDs[i])
+		if loaded.OverlayStyle != overlayStyleIDs[i] || g.overlayWidthSlider.Value != float64(d.width) || g.overlayHeightSlider.Value != float64(d.height) || loaded.OverlayX != -300 {
+			t.Fatalf("style, size controls or position not synchronized: %+v", loaded)
+		}
+	}
+	if len(g.engine.reload) != 0 {
+		t.Fatal("choosing a style should not refresh usage")
+	}
+}
+
+func TestOverlayLayerIndicatorUpdatesWithoutNewFrame(t *testing.T) {
+	a := test.NewApp()
+	defer a.Quit()
+	g := &GUI{app: a, win: a.NewWindow("settings"), engine: NewEngine(defaultConfig(), filepath.Join(t.TempDir(), "config.json"))}
+	g.win.SetContent(g.buildSettingsTab())
+	o := newDesktopOverlayWindow(a.NewWindow("overlay"), func() {}, func(error) {})
+	g.overlay = o
+	o.onLayer = func(layer string) { g.setOverlayAppearance(g.engine.Config().OverlayScale, layer) }
+	o.update(Frame{Source: "codex", Kind: "pct", P1: 78, P2: 69})
+	if o.view.pin.Icon != overlayPinActive || o.view.pin.Importance != widget.MediumImportance {
+		t.Fatal("top layer must start with a highlighted pin")
+	}
+	// No display update or window resize after either action: the icon itself must refresh.
+	test.Tap(o.view.pin)
+	if o.layer != "bottom" || o.view.pin.Icon != overlayPinInactive || o.view.pin.Importance != widget.LowImportance || g.overlayLayerSelect.Selected != "始终置底" {
+		t.Fatal("pin click did not immediately show bottom state")
+	}
+	g.overlayLayerSelect.SetSelected("始终置顶")
+	if o.layer != "top" || o.view.pin.Icon != overlayPinActive || o.view.pin.Importance != widget.MediumImportance {
+		t.Fatal("settings change did not immediately restore top state")
+	}
+	if o.view.frame.P1 != 78 || len(g.engine.reload) != 0 {
+		t.Fatal("indicator update must not require new usage data")
+	}
+}

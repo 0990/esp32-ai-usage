@@ -36,12 +36,21 @@ type Config struct {
 	KimiEndpoint        string `json:"kimi_endpoint"`   // Kimi 订阅的 /coding/v1/usages，留空用默认
 	Autostart           bool   `json:"autostart"`       // 开机启动，默认 false（需用户在设置里手动开启）
 	DesktopOverlay      bool   `json:"desktop_overlay"` // Windows 右上角额度悬浮窗，默认关闭
+	OverlayScale        int    `json:"overlay_scale"`   // 悬浮窗大小百分比，默认 100
+	OverlayLayer        string `json:"overlay_layer"`   // top（置顶）或 bottom（置底）
+	OverlayStyle        string `json:"overlay_style"`   // paper / obsidian / strip（默认）
+	OverlayWidth        int    `json:"overlay_width"`
+	OverlayHeight       int    `json:"overlay_height"`
+	OverlayOpacity      int    `json:"overlay_opacity"` // 整体不透明度，40–100，默认 100
+	OverlayX            int32  `json:"overlay_x"`       // 屏幕物理像素，可为负（副屏）
+	OverlayY            int32  `json:"overlay_y"`
+	OverlayPositionSet  bool   `json:"overlay_position_set"`
 
 	CustomObjects []CustomObject `json:"custom_objects,omitempty"`
 }
 
 func defaultConfig() Config {
-	return Config{OLEDBrightness: defaultOLEDBrightness, Port: "AUTO", Baud: 115200, IntervalSeconds: 300, RetryIntervalSeconds: 60, PageIntervalSeconds: 4, Provider: "codex", Autostart: false}
+	return Config{OLEDBrightness: defaultOLEDBrightness, Port: "AUTO", Baud: 115200, IntervalSeconds: 300, RetryIntervalSeconds: 60, PageIntervalSeconds: 4, Provider: "codex", Autostart: false, OverlayScale: 100, OverlayLayer: "top", OverlayStyle: defaultOverlayStyle, OverlayWidth: 330, OverlayHeight: 132, OverlayOpacity: 100}
 }
 
 // defaultConfigPath 返回固定的配置路径 ~/.esp32-ai-usage/config.json。
@@ -125,6 +134,17 @@ func loadConfig(path string) Config {
 		return cfg // 没有配置文件就全用默认
 	}
 	_ = json.Unmarshal(raw, &cfg)
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) == nil {
+		if _, exists := fields["overlay_style"]; !exists {
+			// 旧透明窗首次升级为极简窄条，保留位置、层级与监控配置。
+			cfg.OverlayStyle = defaultOverlayStyle
+			cfg.OverlayScale = 100
+			cfg.OverlayWidth = 330
+			cfg.OverlayHeight = 132
+			cfg.OverlayOpacity = 100
+		}
+	}
 	if cfg.Baud == 0 {
 		cfg.Baud = 115200
 	}
@@ -142,6 +162,9 @@ func loadConfig(path string) Config {
 	}
 	cfg.Provider = normalizeProvider(cfg.Provider)
 	cfg.OLEDBrightness = clampOLEDBrightness(cfg.OLEDBrightness)
+	cfg.OverlayScale, cfg.OverlayLayer = normalizeOverlayAppearance(cfg.OverlayScale, cfg.OverlayLayer)
+	cfg.OverlayStyle = normalizeOverlayStyle(cfg.OverlayStyle)
+	cfg.OverlayWidth, cfg.OverlayHeight, cfg.OverlayOpacity = normalizeOverlaySize(cfg.OverlayStyle, cfg.OverlayWidth, cfg.OverlayHeight, cfg.OverlayOpacity)
 	return cfg
 }
 

@@ -1,0 +1,32 @@
+{
+  "port": "AUTO",
+  "baud": 115200,
+  "oled_brightness": 143,
+  "interval_seconds": 300,
+  "retry_interval_seconds": 60,
+  "page_interval_seconds": 4,
+  "provider": "codex",
+  "proxy": "",
+  "claude_endpoint": "",
+  "codex_endpoint": "https://chatgpt.com/backend-api/wham/usage",
+  "kimi_endpoint": "",
+  "autostart": false,
+  "desktop_overlay": false,
+  "overlay_scale": 100,
+  "overlay_layer": "top",
+  "overlay_style": "strip",
+  "overlay_width": 330,
+  "overlay_height": 132,
+  "overlay_opacity": 100,
+  "overlay_position_set": false,
+  "custom_objects": [
+    {
+      "id": "example-relay",
+      "name": "我的中转站",
+      "type": "sub2api",
+      "base_url": "https://relay.example/v1",
+      "api_key": "填写你的 API key",
+      "enabled": false
+    }
+  ]
+}

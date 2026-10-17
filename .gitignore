@@ -10,6 +10,9 @@ host/esp32-ai-usage-host
 host/esp32-ai-usage-host.exe
 host/*.exe
 host/bin/
+host-mygo/config.json
+host-mygo/bin/
+host-mygo/*.exe
 
 # ==== PlatformIO / 固件构建产物 ====
 firmware/.pio/

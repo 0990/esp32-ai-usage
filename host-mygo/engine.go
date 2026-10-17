@@ -1,0 +1,734 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"go.bug.st/serial"
+)
+
+// LogLevel 是日志级别。
+type LogLevel int
+
+const (
+	LogInfo LogLevel = iota
+	LogWarn
+	LogError
+)
+
+func (l LogLevel) String() string {
+	switch l {
+	case LogWarn:
+		return "WARN"
+	case LogError:
+		return "ERR"
+	default:
+		return "INFO"
+	}
+}
+
+// LogEntry 是一条结构化日志，供界面渲染。
+type LogEntry struct {
+	Time  time.Time
+	Level LogLevel
+	Tag   string
+	Msg   string
+}
+
+// defaultPageInterval 是 all 模式下 host 主动翻页的默认间隔（固件不再自己翻页）；
+// 可由配置 PageIntervalSeconds 覆盖。
+const defaultPageInterval = 4 * time.Second
+
+// serialReconnectInterval 是串口未连接时的重连尝试间隔。
+const serialReconnectInterval = 3 * time.Second
+
+// pageInterval 返回当前轮播翻页间隔（读配置 PageIntervalSeconds，非法则回退默认）。
+func (e *Engine) pageInterval() time.Duration {
+	secs := e.Config().PageIntervalSeconds
+	if secs <= 0 {
+		return defaultPageInterval
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// Engine 是不依赖 GUI 的后台引擎：按 interval 拉取额度并缓存，由独立的显示循环
+// 主动驱动翻页、把「一屏」(Frame) 单点写给串口。固件只渲染收到的最新 Frame。
+// 通过回调把日志/状态推给界面。界面状态由 Window.Update 投递到主线程。
+type Engine struct {
+	mu      sync.RWMutex // 保护 cfg
+	cfg     Config
+	cfgPath string
+	client  *http.Client
+
+	portMu   sync.Mutex  // 保护 port/portName
+	port     serial.Port // 可能为 nil（未连接）
+	portName string      // 当前端口名（断开为 ""），AUTO 模式用于目标比对
+
+	writeCh   chan []byte   // 唯一的串口写入入口
+	reload    chan struct{} // 通知取数循环立即重新拉取
+	refresh   chan struct{} // 通知显示循环：缓存已更新，立即重画当前页
+	reconnect chan struct{} // 通知串口管理循环：端口已断开/配置已变，立即重连
+
+	// 取数结果缓存（供显示循环按页渲染），由 dataMu 保护。
+	dataMu                                sync.Mutex
+	claude, reclaude, codex, kimi         Provider
+	claudeAt, reclaudeAt, codexAt, kimiAt time.Time
+	custom                                map[string]customResult
+	started                               bool
+	pageIdx                               int
+
+	// activity 记录 Claude Code / Codex CLI 的工作状态（由 hook 回调驱动，见 activity.go）。
+	activity *ActivityTracker
+
+	// 回调由界面设置；界面实现体通过 Window.Update 更新原生 UI。
+	OnLog    func(LogEntry)
+	OnStatus func(string)
+	// OnActivity 在某个 provider 的工作状态聚合值变化时调用（provider: claude/codex；state 见 Act*）。
+	OnActivity func(provider string, state int)
+	// OnDisplay 与串口连接无关，每次切页/数据刷新时通知桌面显示。
+	OnDisplay func(Frame)
+
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+}
+
+// NewEngine 构造引擎（尚未启动 goroutine）。
+func NewEngine(cfg Config, cfgPath string) *Engine {
+	cfg.CustomObjects = append([]CustomObject(nil), cfg.CustomObjects...)
+	e := &Engine{
+		cfg:       cfg,
+		cfgPath:   cfgPath,
+		client:    newHTTPClient(cfg.Proxy),
+		writeCh:   make(chan []byte, 8),
+		reload:    make(chan struct{}, 1),
+		refresh:   make(chan struct{}, 1),
+		reconnect: make(chan struct{}, 1),
+	}
+	// 工作状态变化：记日志、催显示循环立刻重画（让屏幕上的动画即时跟上）、通知界面。
+	e.activity = NewActivityTracker(func(provider string, state int) {
+		e.log(LogInfo, "activity", "%s: %s", provider, actName(state))
+		e.signalRefresh()
+		if e.OnActivity != nil {
+			e.OnActivity(provider, state)
+		}
+	})
+	return e
+}
+
+// Activity 返回某 provider 当前的工作状态（Act*）。
+func (e *Engine) Activity(provider string) int {
+	return e.activity.State(provider)
+}
+
+func (e *Engine) log(level LogLevel, tag, format string, args ...any) {
+	entry := LogEntry{Time: time.Now(), Level: level, Tag: tag, Msg: fmt.Sprintf(format, args...)}
+	// 持久化到文件，便于事后排查（界面没开/已崩溃时也有据可查）。
+	writeLogLine(fmt.Sprintf("%s [%s][%s] %s", entry.Time.Format("2006-01-02 15:04:05"), level, tag, entry.Msg))
+	if e.OnLog != nil {
+		e.OnLog(entry)
+	}
+}
+
+func (e *Engine) status(s string) {
+	if e.OnStatus != nil {
+		e.OnStatus(s)
+	}
+}
+
+// Config 返回当前配置的副本。
+func (e *Engine) Config() Config {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	cfg := e.cfg
+	cfg.CustomObjects = append([]CustomObject(nil), cfg.CustomObjects...)
+	return cfg
+}
+
+// UpdateConfig 应用整套新配置：更新内存、重建 HTTP client（代理可能变）、写盘、催一次刷新。
+// 注意：串口（port/baud）的重连由界面在保存后另行处理。
+func (e *Engine) UpdateConfig(cfg Config) error {
+	cfg.Provider = normalizeProvider(cfg.Provider)
+	cfg.OLEDBrightness = clampOLEDBrightness(cfg.OLEDBrightness)
+	cfg.OverlayScale, cfg.OverlayLayer = normalizeOverlayAppearance(cfg.OverlayScale, cfg.OverlayLayer)
+	cfg.OverlayStyle = normalizeOverlayStyle(cfg.OverlayStyle)
+	cfg.OverlayWidth, cfg.OverlayHeight, cfg.OverlayOpacity = normalizeOverlaySize(cfg.OverlayStyle, cfg.OverlayWidth, cfg.OverlayHeight, cfg.OverlayOpacity)
+	cfg.CustomObjects = append([]CustomObject(nil), cfg.CustomObjects...)
+	for _, obj := range cfg.CustomObjects {
+		if err := obj.validate(); err != nil {
+			return fmt.Errorf("自定义对象 %s: %w", obj.Name, err)
+		}
+	}
+	if err := saveConfig(e.cfgPath, cfg); err != nil {
+		e.log(LogError, "engine", "保存配置失败: %v", err)
+		return err
+	}
+	e.mu.Lock()
+	e.cfg = cfg
+	e.client = newHTTPClient(cfg.Proxy)
+	e.mu.Unlock()
+	e.sendDisplaySettings()
+	e.signalRefresh()
+	e.log(LogInfo, "engine", "配置已保存（provider=%s, interval=%ds, retry=%ds）", cfg.Provider, cfg.IntervalSeconds, cfg.RetryIntervalSeconds)
+	e.Reload()
+	return nil
+}
+
+// SetDesktopOverlay 只保存显示开关，不触发网络查询或串口重连。
+func (e *Engine) SetDesktopOverlay(enabled bool) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	cfg := e.cfg
+	cfg.DesktopOverlay = enabled
+	if err := saveConfig(e.cfgPath, cfg); err != nil {
+		return err
+	}
+	e.cfg = cfg
+	return nil
+}
+
+// SetOverlayAppearance 保存悬浮窗外观，不触发网络查询或串口重连。
+func (e *Engine) SetOverlayAppearance(scale int, layer string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	cfg := e.cfg
+	cfg.OverlayScale, cfg.OverlayLayer = normalizeOverlayAppearance(scale, layer)
+	if err := saveConfig(e.cfgPath, cfg); err != nil {
+		return err
+	}
+	e.cfg = cfg
+	return nil
+}
+
+func (e *Engine) SetOverlayGeometry(width, height, opacity int) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	cfg := e.cfg
+	cfg.OverlayWidth, cfg.OverlayHeight, cfg.OverlayOpacity = normalizeOverlaySize(cfg.OverlayStyle, width, height, opacity)
+	if err := saveConfig(e.cfgPath, cfg); err != nil {
+		return err
+	}
+	e.cfg = cfg
+	return nil
+}
+
+func (e *Engine) SetOverlayPosition(x, y int32, positioned bool) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	cfg := e.cfg
+	cfg.OverlayX, cfg.OverlayY, cfg.OverlayPositionSet = x, y, positioned
+	if err := saveConfig(e.cfgPath, cfg); err != nil {
+		return err
+	}
+	e.cfg = cfg
+	return nil
+}
+
+func (e *Engine) SetOverlayStyle(style string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	cfg := e.cfg
+	cfg.OverlayStyle = normalizeOverlayStyle(style)
+	design := overlayDesignFor(cfg.OverlayStyle)
+	cfg.OverlayWidth, cfg.OverlayHeight, cfg.OverlayScale = int(design.width), int(design.height), 100
+	if err := saveConfig(e.cfgPath, cfg); err != nil {
+		return err
+	}
+	e.cfg = cfg
+	return nil
+}
+
+func (e *Engine) SetOverlayBounds(width, height int, x, y int32) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	cfg := e.cfg
+	cfg.OverlayWidth, cfg.OverlayHeight, cfg.OverlayOpacity = normalizeOverlaySize(cfg.OverlayStyle, width, height, cfg.OverlayOpacity)
+	cfg.OverlayX, cfg.OverlayY, cfg.OverlayPositionSet = x, y, true
+	if err := saveConfig(e.cfgPath, cfg); err != nil {
+		return err
+	}
+	e.cfg = cfg
+	return nil
+}
+
+// Reload 非阻塞地催取数循环立即重新拉取（reload 容量 1，已有挂起信号则忽略）。
+func (e *Engine) Reload() {
+	select {
+	case e.reload <- struct{}{}:
+	default:
+	}
+}
+
+// signalRefresh 非阻塞地通知显示循环：缓存已更新，立即重画当前页。
+func (e *Engine) signalRefresh() {
+	select {
+	case e.refresh <- struct{}{}:
+	default:
+	}
+}
+
+// setPort 设置/更换串口；关闭旧的并刷新状态。name 为当前端口名，传 "" 表示断开。
+func (e *Engine) setPort(p serial.Port, name, status string) {
+	e.portMu.Lock()
+	old := e.port
+	e.port, e.portName = p, name
+	e.portMu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+	e.status(status)
+}
+
+// ReconnectSerial 关闭当前串口并催串口管理循环立即按最新配置重连
+// （界面在 port/baud 变更后调用）。信号容量 1，已有挂起信号则合并。
+func (e *Engine) ReconnectSerial() {
+	e.setPort(nil, "", "串口: 重连中…")
+	select {
+	case e.reconnect <- struct{}{}:
+	default:
+	}
+}
+
+// signalReconnect 非阻塞地催串口管理循环立即重连（写失败判定断开时用）。
+func (e *Engine) signalReconnect() {
+	select {
+	case e.reconnect <- struct{}{}:
+	default:
+	}
+}
+
+// Send 把一行 JSON 投到串口写入队列（自动补 \n）。取数循环与测试按钮都走这里。
+func (e *Engine) Send(line []byte) {
+	if len(line) == 0 {
+		return
+	}
+	if line[len(line)-1] != '\n' {
+		buf := make([]byte, len(line)+1)
+		copy(buf, line)
+		buf[len(line)] = '\n'
+		line = buf
+	}
+	select {
+	case e.writeCh <- line:
+	case <-e.ctx.Done():
+	}
+}
+
+// 单独发送显示设置；没有取数结果时也能调整 Waiting 页面亮度。
+func (e *Engine) sendDisplaySettings() {
+	if e.ctx == nil {
+		return
+	} // 引擎尚未启动
+	e.Send(displaySettingsCommand(e.Config().OLEDBrightness))
+}
+
+// Start 启动串口管理、串口写入、取数、显示四个 goroutine，外加凭据文件监听。
+func (e *Engine) Start(ctx context.Context) {
+	e.ctx, e.cancel = context.WithCancel(ctx)
+	e.loadCache() // 先把上次的数据装回来，首轮取数失败也有东西可显示
+	e.signalRefresh()
+	e.wg.Add(5)
+	go e.serialManagerLoop()
+	go e.serialWriterLoop()
+	go e.fetchLoop()
+	go e.displayLoop()
+	go e.activityLoop()
+	go watchCredentials(e.ctx, e) // 监听 ~/.codex、~/.claude 变动（feature 5）
+}
+
+// activityLoop 在本地端口上接收两家 CLI 的 hook 回调，直到退出。端口被占只记日志（功能降级）。
+func (e *Engine) activityLoop() {
+	defer e.wg.Done()
+	defer recoverLog("activityLoop")
+	if err := e.activity.Serve(e.ctx); err != nil {
+		e.log(LogWarn, "activity", "工作状态回调端口 %s 监听失败: %v（屏幕不会显示运行标志）", activityAddr, err)
+	}
+}
+
+// Stop 取消上下文、等待 goroutine 退出、关闭串口。可重复调用。
+func (e *Engine) Stop() {
+	if e.cancel != nil {
+		e.cancel()
+	}
+	e.wg.Wait()
+	e.portMu.Lock()
+	if e.port != nil {
+		e.port.Close()
+		e.port, e.portName = nil, ""
+	}
+	e.portMu.Unlock()
+}
+
+// serialWriterLoop 是唯一执行 port.Write 的地方，从结构上杜绝并发写。
+// 写失败视为设备已断开（如 ESP32 被拔掉）：清空端口并催管理循环重连，
+// 重插后由 serialManagerLoop 自动恢复，无需重启 host。
+func (e *Engine) serialWriterLoop() {
+	defer e.wg.Done()
+	defer recoverLog("serialWriterLoop")
+	var lastDropLog time.Time // 「未连接丢弃」日志限流，避免断连期间刷屏
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case line := <-e.writeCh:
+			e.portMu.Lock()
+			p := e.port
+			e.portMu.Unlock()
+			if p == nil {
+				if time.Since(lastDropLog) > time.Minute {
+					e.log(LogWarn, "serial", "串口未连接，丢弃 %d 字节（同类日志每分钟最多一条）", len(line))
+					lastDropLog = time.Now()
+				}
+				continue
+			}
+			if _, err := p.Write(line); err != nil {
+				e.log(LogError, "serial", "写串口失败: %v（视为已断开，等待重连）", err)
+				e.setPort(nil, "", "串口: 已断开，等待重连…")
+				e.signalReconnect()
+			}
+		}
+	}
+}
+
+// serialManagerLoop 负责串口的连接与断线重连。每 serialReconnectInterval 重新计算
+// 「目标串口」（desiredPort）并与当前口比对：
+//   - 当前口已不在枚举里（被拔掉）或出现了更优目标（如 AUTO 兜底换成真 ESP32）→ 断开重选；
+//   - 未连接且目标存在 → 打开；
+//   - 目标不存在 → 状态栏置未连接，继续等。
+//
+// reconnect 信号（写失败/配置变更）可提前唤醒立即重查；写失败那条快速通道覆盖
+// 「同 COM 号快速拔插、枚举名没变但句柄已失效」的情况。这样 ESP32 拔掉再插上、
+// 或 host 启动时设备还没插，都能自动识别恢复，无需重启 host。
+func (e *Engine) serialManagerLoop() {
+	defer e.wg.Done()
+	defer recoverLog("serialManagerLoop")
+	firstTry := true // 每个断连周期只记一次日志，避免重试刷屏
+	for {
+		cfg := e.Config()
+		desired, ok, candidates := desiredPort(cfg.Port)
+
+		e.portMu.Lock()
+		cur, curName := e.port, e.portName
+		e.portMu.Unlock()
+
+		switch {
+		case cur != nil && (!ok || desired != curName):
+			// 当前口被拔掉/目标变了 → 断开，立即重选（不等间隔）
+			e.log(LogInfo, "serial", "%s 已不可用，重新选择串口…", curName)
+			e.setPort(nil, "", "串口: 未连接")
+			firstTry = true
+			continue
+		case cur == nil && ok:
+			e.tryOpen(desired, cfg.Baud, firstTry)
+			firstTry = false
+		case cur == nil && !ok:
+			if firstTry {
+				hint := strings.Join(candidates, ", ")
+				if hint == "" {
+					hint = "（无）"
+				}
+				e.log(LogWarn, "serial", "未发现 ESP32 串口（找 VID=%s）。可用串口: %s", espressifVID, hint)
+			}
+			e.status("串口: 未连接")
+			firstTry = false
+		default: // 已连接且目标未变
+			firstTry = true
+		}
+
+		timer := time.NewTimer(serialReconnectInterval)
+		select {
+		case <-e.ctx.Done():
+			timer.Stop()
+			return
+		case <-e.reconnect: // 写失败/配置变更 → 立即重查，不等间隔
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
+}
+
+// tryOpen 打开目标串口并设为当前口；logFail 为 false 时失败静默（只更新状态栏）。
+func (e *Engine) tryOpen(name string, baud int, logFail bool) {
+	p, err := openSerial(name, baud)
+	if err != nil {
+		if logFail {
+			e.log(LogError, "serial", "%v", err)
+		}
+		e.status("串口: 打开失败")
+		return
+	}
+	select {
+	case <-e.ctx.Done(): // 退出中：别留着新开的端口
+		p.Close()
+		return
+	case <-time.After(2 * time.Second): // 等 ESP32 复位就绪
+	}
+	e.setPort(p, name, fmt.Sprintf("串口: %s @ %d", name, baud))
+	e.log(LogInfo, "serial", "已连接 %s @ %d", name, baud)
+	e.sendDisplaySettings()
+	// 串口刚连上就把当前页发过去：启动时首帧往往早于串口就绪而被丢弃，
+	// 否则要等到下一次翻页定时器（轮播间隔可能长达 60s）屏幕才会离开等待屏。
+	e.signalRefresh()
+}
+
+// fetchLoop 启动即立即取一次；之后按结果选间隔：失败用 RetryIntervalSeconds、
+// 成功用 IntervalSeconds。provider 改变/凭据变动（reload）或退出（ctx）会提前唤醒。
+func (e *Engine) fetchLoop() {
+	defer e.wg.Done()
+	defer recoverLog("fetchLoop")
+	for {
+		e.mu.RLock()
+		cfg := e.cfg
+		client := e.client
+		e.mu.RUnlock()
+
+		ok := e.fetchOnce(e.ctx, client, cfg)
+
+		secs := cfg.RetryIntervalSeconds
+		if ok {
+			secs = cfg.IntervalSeconds
+		}
+		if secs <= 0 {
+			secs = 60
+		}
+
+		timer := time.NewTimer(time.Duration(secs) * time.Second)
+		select {
+		case <-e.ctx.Done():
+			timer.Stop()
+			return
+		case <-e.reload: // provider 改变 / 凭据变动 → 立即重新拉取
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
+}
+
+// fetchOnce 取一轮额度，更新缓存（成功才更新对应时间戳，失败保留上次好数据）。
+// 返回本轮是否「成功」（至少一个被请求的 provider 取到数据），fetchLoop 据此决定下次间隔。
+// 取数与下发解耦：实际下发由 displayLoop 按页驱动。ctx 取消（退出中）时跳过取消导致的错误日志。
+func (e *Engine) fetchOnce(ctx context.Context, client *http.Client, cfg Config) bool {
+	success := false
+	var reclaudeClient *http.Client
+	if cfg.wants("reclaude") {
+		var err error
+		reclaudeClient, err = newReclaudeHTTPClient()
+		if err != nil && ctx.Err() == nil {
+			e.log(LogError, "reclaude", "%v", err)
+		}
+		if reclaudeClient != nil {
+			defer reclaudeClient.CloseIdleConnections()
+		}
+	}
+	for _, p := range []struct {
+		name, endpoint string
+		fetch          func(context.Context, *http.Client, string, bool) (Provider, error)
+	}{
+		{"codex", cfg.CodexEndpoint, fetchCodex}, {"claude", cfg.ClaudeEndPoint, fetchClaude},
+	} {
+		if !cfg.wants(p.name) {
+			continue
+		}
+		value, err := p.fetch(ctx, client, p.endpoint, false)
+		if err != nil {
+			if ctx.Err() == nil {
+				e.log(LogError, p.name, "%v", err)
+			}
+			continue
+		}
+		e.dataMu.Lock()
+		if p.name == "codex" {
+			e.codex = value
+			e.codexAt = time.Now()
+		} else {
+			e.claude = value
+			e.claudeAt = time.Now()
+		}
+		e.dataMu.Unlock()
+		e.log(LogInfo, p.name, "5h 剩 %d%% / 周 剩 %d%%", value.H5.Left, value.Wk.Left)
+		success = true
+	}
+	for _, obj := range cfg.CustomObjects {
+		if !obj.Enabled {
+			continue
+		}
+		r, err := fetchCustomObject(ctx, client, obj)
+		if err != nil {
+			if ctx.Err() == nil {
+				e.log(LogError, obj.Name, "%v", err)
+			}
+			continue
+		}
+		e.dataMu.Lock()
+		if e.custom == nil {
+			e.custom = map[string]customResult{}
+		}
+		e.custom[obj.cacheKey()] = customResult{Relay: r, At: time.Now()}
+		e.dataMu.Unlock()
+		e.log(LogInfo, obj.Name, "%s %s%g / 余额 %s%g", r.Label, r.Unit, r.Used, r.Unit, r.Balance)
+		success = true
+	}
+	if cfg.wants("reclaude") && reclaudeClient != nil {
+		// ReClaude's daemon proxies the first-party Anthropic endpoint. Keep this
+		// independent from the configurable Claude relay endpoint above.
+		if p, err := fetchReclaude(ctx, reclaudeClient, defaultReclaudeEndpoint, false); err != nil {
+			if ctx.Err() == nil {
+				e.log(LogError, "reclaude", "%v", err)
+			}
+		} else {
+			e.dataMu.Lock()
+			e.reclaude = p
+			e.reclaudeAt = time.Now()
+			e.dataMu.Unlock()
+			e.log(LogInfo, "reclaude", "5h 剩 %d%% (复位 %s) / 周 剩 %d%% (复位 %s)",
+				p.H5.Left, p.H5.Reset, p.Wk.Left, p.Wk.Reset)
+			success = true
+		}
+	}
+	if cfg.wants("kimi") {
+		if p, err := fetchKimi(ctx, client, cfg.KimiEndpoint, false); err != nil {
+			if ctx.Err() == nil {
+				e.log(LogError, "kimi", "%v", err)
+			}
+		} else {
+			e.dataMu.Lock()
+			e.kimi = p
+			e.kimiAt = time.Now()
+			e.dataMu.Unlock()
+			e.log(LogInfo, "kimi", "5h 剩 %d%% (复位 %s) / 周 剩 %d%% (复位 %s)",
+				p.H5.Left, p.H5.Reset, p.Wk.Left, p.Wk.Reset)
+			success = true
+		}
+	}
+
+	e.dataMu.Lock()
+	e.started = true
+	e.dataMu.Unlock()
+	if ctx.Err() == nil {
+		if success {
+			e.saveCache() // 成功才落盘：下次启动先显示这份
+		}
+		e.signalRefresh() // 催显示循环立即重画
+	}
+	return success
+}
+
+// displayLoop 按 pageInterval() 主动翻页并下发当前页；缓存更新（refresh）时立即重画同一页。
+// 翻页逻辑完全在 host 这一侧，固件只渲染收到的最新 Frame。每轮按当前配置重置定时器，
+// 使「轮询间隔」改动（保存后经 reload→refresh）立即生效。
+func (e *Engine) displayLoop() {
+	defer e.wg.Done()
+	defer recoverLog("displayLoop")
+	timer := time.NewTimer(e.pageInterval())
+	defer timer.Stop()
+	resetTimer := func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(e.pageInterval())
+	}
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-timer.C:
+			e.renderCurrent(true) // 翻到下一页
+			timer.Reset(e.pageInterval())
+		case <-e.refresh:
+			e.renderCurrent(false) // 新数据/配置变动：重画当前页并按新间隔重置
+			resetTimer()
+		}
+	}
+}
+
+// renderCurrent 取当前应显示的页集合，按 advance 决定是否前进页码，下发该页。
+// 还没有任何数据时不下发（固件保持「等待」屏）。
+func (e *Engine) renderCurrent(advance bool) {
+	frames := e.buildFrames()
+	if len(frames) == 0 {
+		return
+	}
+	e.dataMu.Lock()
+	if advance {
+		e.pageIdx++
+	}
+	if e.pageIdx >= len(frames) {
+		e.pageIdx = 0
+	}
+	idx := e.pageIdx
+	e.dataMu.Unlock()
+
+	f := frames[idx]
+	brightness := clampOLEDBrightness(e.Config().OLEDBrightness)
+	f.Brightness = &brightness
+	if e.OnDisplay != nil {
+		e.OnDisplay(f)
+	}
+	line, _ := json.Marshal(f)
+	e.Send(line)
+}
+
+// buildFrames 依据 provider 配置 + 缓存数据，组装当前要轮播的页列表。
+// 首轮取数完成前返回 nil（让固件停留在等待屏）。
+func (e *Engine) buildFrames() []Frame {
+	cfg := e.Config()
+	now := time.Now()
+	stale := func(at time.Time) bool {
+		thr := 2*time.Duration(cfg.IntervalSeconds)*time.Second + 15*time.Second
+		if thr < 90*time.Second {
+			thr = 90 * time.Second
+		}
+		return !at.IsZero() && now.Sub(at) > thr
+	}
+
+	e.dataMu.Lock()
+	defer e.dataMu.Unlock()
+	if !e.started {
+		return nil
+	}
+	// 工作状态：claude 与 reclaude 都是 Claude Code CLI（只是 token 不同），共用 claude 的状态。
+	claudeAct := e.activity.State("claude")
+	codexAct := e.activity.State("codex")
+	var frames []Frame
+	if cfg.wants("claude") {
+		f := pctFrame("claude", e.claude, stale(e.claudeAt))
+		f.Act = claudeAct
+		f.Source = "claude"
+		frames = append(frames, f)
+	}
+	if cfg.wants("reclaude") {
+		f := pctFrame("claude", e.reclaude, stale(e.reclaudeAt))
+		f.Act = claudeAct
+		f.Source = "reclaude"
+		frames = append(frames, f)
+	}
+	if cfg.wants("codex") {
+		f := pctFrame("codex", e.codex, stale(e.codexAt))
+		f.Act = codexAct
+		f.Source = "codex"
+		frames = append(frames, f)
+	}
+	if cfg.wants("kimi") {
+		f := pctFrame("kimi", e.kimi, stale(e.kimiAt))
+		f.Source = "kimi"
+		frames = append(frames, f)
+	}
+	for _, obj := range cfg.CustomObjects {
+		if !obj.Enabled {
+			continue
+		}
+		result := e.custom[obj.cacheKey()]
+		f := balanceFrame(obj.Type, result.Relay, stale(result.At))
+		f.Source = obj.Name
+		frames = append(frames, f)
+	}
+	return frames
+}

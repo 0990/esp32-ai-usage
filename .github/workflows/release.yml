@@ -1,8 +1,7 @@
 # 推送 tag 时自动创建 Draft Release，构建 Windows exe 并上传为 Release 资产。
 #
-# 本项目是 Fyne 桌面程序，需要 CGO + C 编译器（windows-latest 自带 MinGW-w64 gcc），
-# 故在 Windows runner 上原生构建（CGO 交叉编译 Fyne 很麻烦）。程序本身也是 Windows 专用
-# （开机自启仅 Windows、串口/OLED 场景），因此只产出 Windows amd64。
+# Fyne 版需要 CGO + C 编译器（windows-latest 自带 MinGW-w64 gcc），
+# MyGo 版使用纯 Go 构建。两版分别使用各自的 Go 工具链，只产出 Windows amd64。
 name: Build Windows Release
 
 on:
@@ -37,11 +36,26 @@ jobs:
           CGO_ENABLED: 1
         run: go build -ldflags "-s -w -H=windowsgui" -o "bin/esp32-ai-usage-${{ github.ref_name }}.exe" .
 
-      - name: Create draft release and attach exe
+      - name: Set up Go for MyGo
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: host-mygo/go.mod
+          cache-dependency-path: host-mygo/go.sum
+
+      - name: Build MyGo exe (-s -w -H=windowsgui)
+        working-directory: host-mygo
+        env:
+          CGO_ENABLED: 0
+        run: go build -trimpath -ldflags "-s -w -H=windowsgui" -o "bin/esp32-ai-usage-mygo-${{ github.ref_name }}.exe" .
+
+      - name: Create draft release and attach exes
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           draft: true
           generate_release_notes: true
-          files: host/bin/esp32-ai-usage-${{ github.ref_name }}.exe
+          fail_on_unmatched_files: true
+          files: |
+            host/bin/esp32-ai-usage-${{ github.ref_name }}.exe
+            host-mygo/bin/esp32-ai-usage-mygo-${{ github.ref_name }}.exe

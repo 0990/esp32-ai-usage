@@ -12,6 +12,13 @@
   "kimi_endpoint": "",
   "autostart": false,
   "desktop_overlay": false,
+  "overlay_scale": 100,
+  "overlay_layer": "top",
+  "overlay_style": "strip",
+  "overlay_width": 330,
+  "overlay_height": 132,
+  "overlay_opacity": 100,
+  "overlay_position_set": false,
   "custom_objects": [
     {
       "id": "example-relay",

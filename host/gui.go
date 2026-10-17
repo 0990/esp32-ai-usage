@@ -33,16 +33,19 @@ type GUI struct {
 	win    fyne.Window
 	engine *Engine
 
-	logLines     []string
-	logLabel     *widget.Label
-	logScroll    *container.Scroll
-	status       *widget.Label  // 常驻底部的串口状态
-	actLabel     *widget.Label  // 常驻底部右侧：Claude / Codex 的工作状态
-	actState     map[string]int // provider -> Act*（OnActivity 回调更新）
-	overlay      *desktopOverlay
-	overlayCheck *widget.Check
-	overlayItem  *fyne.MenuItem
-	trayMenu     *fyne.Menu
+	logLines                                []string
+	logLabel                                *widget.Label
+	logScroll                               *container.Scroll
+	status                                  *widget.Label  // 常驻底部的串口状态
+	actLabel                                *widget.Label  // 常驻底部右侧：Claude / Codex 的工作状态
+	actState                                map[string]int // provider -> Act*（OnActivity 回调更新）
+	overlay                                 *desktopOverlay
+	overlayCheck                            *widget.Check
+	overlayItem                             *fyne.MenuItem
+	trayMenu                                *fyne.Menu
+	overlayStyleSelect, overlayLayerSelect  *widget.Select
+	overlayWidthSlider, overlayHeightSlider *widget.Slider
+	syncingOverlay                          bool
 }
 
 // RunGUI 构建界面、启动引擎并进入事件循环（阻塞直到退出）。
@@ -266,12 +269,79 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 
 	autostartCheck := widget.NewCheck("开机时自动启动本程序", nil)
 	autostartCheck.SetChecked(cfg.Autostart)
-	g.overlayCheck = widget.NewCheck("在桌面右上角显示额度（立即生效）", g.setDesktopOverlay)
+	g.overlayCheck = widget.NewCheck("在桌面显示额度（立即生效）", g.setDesktopOverlay)
 	g.overlayCheck.Disable()
 	if desktopOverlaySupported {
 		g.overlayCheck.Enable()
 	}
 	g.overlayCheck.SetChecked(cfg.DesktopOverlay)
+	g.overlayStyleSelect = widget.NewSelect(overlayStyleNames, nil)
+	g.overlayStyleSelect.SetSelected(overlayDesignFor(cfg.OverlayStyle).name)
+	g.overlayStyleSelect.OnChanged = func(name string) {
+		for i, label := range overlayStyleNames {
+			if name == label {
+				g.setOverlayStyle(overlayStyleIDs[i])
+				return
+			}
+		}
+	}
+	_, overlayLayer := normalizeOverlayAppearance(cfg.OverlayScale, cfg.OverlayLayer)
+	width, height, opacity := normalizeOverlaySize(cfg.OverlayStyle, cfg.OverlayWidth, cfg.OverlayHeight, cfg.OverlayOpacity)
+	geometrySlider := func(value, low, high float64, unit string, save func(int)) (*widget.Slider, *fyne.Container) {
+		slider := widget.NewSlider(low, high)
+		slider.Step = 1
+		slider.SetValue(value)
+		label := widget.NewLabel(fmt.Sprintf("%d%s", int(value), unit))
+		slider.OnChanged = func(v float64) { label.SetText(fmt.Sprintf("%d%s", int(v), unit)) }
+		slider.OnChangeEnded = func(v float64) {
+			if !g.syncingOverlay {
+				save(int(v))
+			}
+		}
+		return slider, container.NewBorder(nil, nil, nil, label, slider)
+	}
+	widthSlider, widthRow := geometrySlider(float64(width), 180, 1000, "", func(v int) {
+		c := g.engine.Config()
+		g.setOverlayGeometry(v, c.OverlayHeight, c.OverlayOpacity)
+	})
+	heightSlider, heightRow := geometrySlider(float64(height), 120, 800, "", func(v int) {
+		c := g.engine.Config()
+		g.setOverlayGeometry(c.OverlayWidth, v, c.OverlayOpacity)
+	})
+	g.overlayWidthSlider, g.overlayHeightSlider = widthSlider, heightSlider
+	opacitySlider, opacityRow := geometrySlider(float64(opacity), 40, 100, "%", func(v int) {
+		c := g.engine.Config()
+		g.setOverlayGeometry(c.OverlayWidth, c.OverlayHeight, v)
+	})
+	overlayLayerSelect := widget.NewSelect([]string{"始终置顶", "始终置底"}, nil)
+	g.overlayLayerSelect = overlayLayerSelect
+	if overlayLayer == "bottom" {
+		overlayLayerSelect.SetSelected("始终置底")
+	} else {
+		overlayLayerSelect.SetSelected("始终置顶")
+	}
+	overlayLayerSelect.OnChanged = func(s string) {
+		layer := "top"
+		if s == "始终置底" {
+			layer = "bottom"
+		}
+		g.setOverlayAppearance(g.engine.Config().OverlayScale, layer)
+	}
+	if !desktopOverlaySupported {
+		g.overlayStyleSelect.Disable()
+		widthSlider.Disable()
+		heightSlider.Disable()
+		opacitySlider.Disable()
+		overlayLayerSelect.Disable()
+	}
+	resetOverlay := widget.NewButton("回到右上角", g.resetOverlayPosition)
+	if !desktopOverlaySupported {
+		resetOverlay.Disable()
+	}
+	overlayControls := container.NewVBox(g.overlayCheck,
+		widget.NewForm(widget.NewFormItem("样式", g.overlayStyleSelect), widget.NewFormItem("宽度", widthRow), widget.NewFormItem("高度", heightRow),
+			widget.NewFormItem("不透明度", opacityRow), widget.NewFormItem("层级", overlayLayerSelect)),
+		container.NewHBox(widget.NewLabel("拖动悬浮窗顶部名称可移动"), resetOverlay))
 
 	// 顶部只放常用项；其余折叠进「更多」。
 	fetchNowBtn := widget.NewButton("立即刷新使用量", func() {
@@ -319,7 +389,7 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 		widget.NewFormItem("监控对象", monitorObjects),
 		widget.NewFormItem("OLED 亮度", brightnessRow),
 		widget.NewFormItem("开机启动", autostartCheck),
-		widget.NewFormItem("桌面悬浮窗", g.overlayCheck),
+		widget.NewFormItem("桌面悬浮窗", overlayControls),
 		widget.NewFormItem("运行标志钩子", hooksRow),
 	)
 	moreForm := widget.NewForm(
@@ -397,6 +467,15 @@ func (g *GUI) buildSettingsTab() fyne.CanvasObject {
 			KimiEndpoint:         old.KimiEndpoint,
 			Autostart:            autostartCheck.Checked,
 			DesktopOverlay:       old.DesktopOverlay,
+			OverlayScale:         old.OverlayScale,
+			OverlayLayer:         old.OverlayLayer,
+			OverlayStyle:         old.OverlayStyle,
+			OverlayWidth:         old.OverlayWidth,
+			OverlayHeight:        old.OverlayHeight,
+			OverlayOpacity:       old.OverlayOpacity,
+			OverlayX:             old.OverlayX,
+			OverlayY:             old.OverlayY,
+			OverlayPositionSet:   old.OverlayPositionSet,
 		}
 		if newCfg.Port == "" {
 			newCfg.Port = "AUTO"

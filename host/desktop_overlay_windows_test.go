@@ -38,8 +38,12 @@ func TestDesktopOverlayWindowsPlacement(t *testing.T) {
 	}
 	foreground := overlayUser32.NewProc("GetForegroundWindow")
 	before, _, _ := foreground.Call()
-	overlayUser32.NewProc("ShowWindow").Call(hwnd, 4) // SW_SHOWNOACTIVATE
-	if err := positionDesktopOverlay(overlayNativeTestWindow{hwnd: hwnd}); err != nil {
+	// Exercise a shown but fully transparent window, like the real splash window.
+	if err := positionDesktopOverlay(overlayNativeTestWindow{hwnd: hwnd}, "top", 0, 0, 0, false, "strip"); err != nil {
+		t.Fatal(err)
+	}
+	overlayUser32.NewProc("ShowWindow").Call(hwnd, 4)
+	if err := positionDesktopOverlay(overlayNativeTestWindow{hwnd: hwnd}, "top", 0, 0, 0, false, "strip"); err != nil {
 		t.Fatal(err)
 	}
 	var rect, work overlayRect
@@ -60,5 +64,53 @@ func TestDesktopOverlayWindowsPlacement(t *testing.T) {
 	after, _, _ := foreground.Call()
 	if after != before {
 		t.Fatal("positioning stole foreground focus")
+	}
+	if err := positionDesktopOverlay(overlayNativeTestWindow{hwnd: hwnd}, "bottom", 0, 200, 150, true, "obsidian"); err != nil {
+		t.Fatal(err)
+	}
+	style, _, _ = overlayGetStyle.Call(hwnd, uintptr(index))
+	if style&0x00000008 != 0 || style&0x08000080 != 0x08000080 {
+		t.Fatalf("bottom layer must cancel topmost and preserve no-activate/toolwindow: %x", style)
+	}
+	overlayGetRect.Call(hwnd, uintptr(unsafe.Pointer(&rect)))
+	if rect.Left != 200 || rect.Top != 150 {
+		t.Fatalf("custom position was ignored: %+v", rect)
+	}
+	var key, flags uint32
+	var alpha byte
+	if r, _, err := overlayUser32.NewProc("GetLayeredWindowAttributes").Call(hwnd, uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&alpha)), uintptr(unsafe.Pointer(&flags))); r == 0 || flags != 2 {
+		t.Fatalf("solid card must not use color-key transparency: key=%x flags=%x error=%v", key, flags, err)
+	}
+	region, _, _ := overlayGDI32.NewProc("CreateRectRgn").Call(0, 0, 1, 1)
+	defer overlayDeleteObject.Call(region)
+	if r, _, err := overlayUser32.NewProc("GetWindowRgn").Call(hwnd, region); r == 0 {
+		t.Fatal(err)
+	}
+	corner, _, _ := overlayGDI32.NewProc("PtInRegion").Call(region, 0, 0)
+	center, _, _ := overlayGDI32.NewProc("PtInRegion").Call(region, 170, 140)
+	if corner != 0 || center == 0 {
+		t.Fatal("native card region must clip corners and retain the center")
+	}
+	if err := positionDesktopOverlay(overlayNativeTestWindow{hwnd: hwnd}, "top", 0, 200, 150, true, "paper"); err != nil {
+		t.Fatal(err)
+	}
+	style, _, _ = overlayGetStyle.Call(hwnd, uintptr(index))
+	if style&required != required {
+		t.Fatalf("switching back to top must restore topmost: %x", style)
+	}
+	origin, err := beginDesktopOverlayDrag(overlayNativeTestWindow{hwnd: hwnd})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate cursor displacement without moving the user's pointer.
+	origin.Cursor.X -= 40
+	origin.Cursor.Y -= 20
+	point, err := moveDesktopOverlayDrag(overlayNativeTestWindow{hwnd: hwnd}, origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlayGetRect.Call(hwnd, uintptr(unsafe.Pointer(&rect)))
+	if point.X != 240 || point.Y != 170 || rect.Left != point.X || rect.Top != point.Y {
+		t.Fatalf("drag must use screen cursor deltas: point=%+v rect=%+v", point, rect)
 	}
 }

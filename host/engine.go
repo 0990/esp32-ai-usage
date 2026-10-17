@@ -155,6 +155,9 @@ func (e *Engine) Config() Config {
 func (e *Engine) UpdateConfig(cfg Config) error {
 	cfg.Provider = normalizeProvider(cfg.Provider)
 	cfg.OLEDBrightness = clampOLEDBrightness(cfg.OLEDBrightness)
+	cfg.OverlayScale, cfg.OverlayLayer = normalizeOverlayAppearance(cfg.OverlayScale, cfg.OverlayLayer)
+	cfg.OverlayStyle = normalizeOverlayStyle(cfg.OverlayStyle)
+	cfg.OverlayWidth, cfg.OverlayHeight, cfg.OverlayOpacity = normalizeOverlaySize(cfg.OverlayStyle, cfg.OverlayWidth, cfg.OverlayHeight, cfg.OverlayOpacity)
 	cfg.CustomObjects = append([]CustomObject(nil), cfg.CustomObjects...)
 	for _, obj := range cfg.CustomObjects {
 		if err := obj.validate(); err != nil {
@@ -182,6 +185,70 @@ func (e *Engine) SetDesktopOverlay(enabled bool) error {
 	defer e.mu.Unlock()
 	cfg := e.cfg
 	cfg.DesktopOverlay = enabled
+	if err := saveConfig(e.cfgPath, cfg); err != nil {
+		return err
+	}
+	e.cfg = cfg
+	return nil
+}
+
+// SetOverlayAppearance 保存悬浮窗外观，不触发网络查询或串口重连。
+func (e *Engine) SetOverlayAppearance(scale int, layer string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	cfg := e.cfg
+	cfg.OverlayScale, cfg.OverlayLayer = normalizeOverlayAppearance(scale, layer)
+	if err := saveConfig(e.cfgPath, cfg); err != nil {
+		return err
+	}
+	e.cfg = cfg
+	return nil
+}
+
+func (e *Engine) SetOverlayGeometry(width, height, opacity int) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	cfg := e.cfg
+	cfg.OverlayWidth, cfg.OverlayHeight, cfg.OverlayOpacity = normalizeOverlaySize(cfg.OverlayStyle, width, height, opacity)
+	if err := saveConfig(e.cfgPath, cfg); err != nil {
+		return err
+	}
+	e.cfg = cfg
+	return nil
+}
+
+func (e *Engine) SetOverlayPosition(x, y int32, positioned bool) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	cfg := e.cfg
+	cfg.OverlayX, cfg.OverlayY, cfg.OverlayPositionSet = x, y, positioned
+	if err := saveConfig(e.cfgPath, cfg); err != nil {
+		return err
+	}
+	e.cfg = cfg
+	return nil
+}
+
+func (e *Engine) SetOverlayStyle(style string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	cfg := e.cfg
+	cfg.OverlayStyle = normalizeOverlayStyle(style)
+	design := overlayDesignFor(cfg.OverlayStyle)
+	cfg.OverlayWidth, cfg.OverlayHeight, cfg.OverlayScale = int(design.width), int(design.height), 100
+	if err := saveConfig(e.cfgPath, cfg); err != nil {
+		return err
+	}
+	e.cfg = cfg
+	return nil
+}
+
+func (e *Engine) SetOverlayBounds(width, height int, x, y int32) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	cfg := e.cfg
+	cfg.OverlayWidth, cfg.OverlayHeight, cfg.OverlayOpacity = normalizeOverlaySize(cfg.OverlayStyle, width, height, cfg.OverlayOpacity)
+	cfg.OverlayX, cfg.OverlayY, cfg.OverlayPositionSet = x, y, true
 	if err := saveConfig(e.cfgPath, cfg); err != nil {
 		return err
 	}
