@@ -15,7 +15,7 @@ func TestSingleInstanceSecondaryUsesFallback(t *testing.T) {
 	defer ln.Close()
 	shown := make(chan struct{}, 1)
 	go serveSingleInstance(ln, func() { shown <- struct{}{} })
-	listener, primary := acquireSingleInstanceAt([]string{"invalid address", ln.Addr().String()})
+	listener, primary := acquireSingleInstanceAt([]string{"invalid address", ln.Addr().String()}, true)
 	if primary || listener != nil {
 		t.Fatal("secondary should notify the existing instance and exit")
 	}
@@ -23,6 +23,37 @@ func TestSingleInstanceSecondaryUsesFallback(t *testing.T) {
 	case <-shown:
 	case <-time.After(time.Second):
 		t.Fatal("existing window was not notified")
+	}
+}
+
+func TestSingleInstanceAutostartDoesNotShowWindow(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	shown := make(chan struct{}, 1)
+	go serveSingleInstance(ln, func() { shown <- struct{}{} })
+	listener, primary := acquireSingleInstanceAt([]string{ln.Addr().String()}, false)
+	if listener != nil {
+		defer listener.Close()
+	}
+	if primary || listener != nil {
+		t.Fatal("autostart must reuse the running instance")
+	}
+	select {
+	case <-shown:
+		t.Fatal("autostart must not show the existing window")
+	default:
+	}
+	// A subsequent manual launch must still be able to open settings.
+	if err := notifySingleInstance(ln.Addr().String(), true); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-shown:
+	case <-time.After(time.Second):
+		t.Fatal("manual launch did not show the existing window")
 	}
 }
 
@@ -42,7 +73,7 @@ func TestSingleInstanceUnrelatedServiceUsesFallback(t *testing.T) {
 			c.Close()
 		}
 	}()
-	listener, primary := acquireSingleInstanceAt([]string{ln.Addr().String(), "127.0.0.1:0"})
+	listener, primary := acquireSingleInstanceAt([]string{ln.Addr().String(), "127.0.0.1:0"}, true)
 	if listener != nil {
 		defer listener.Close()
 	}
@@ -52,7 +83,7 @@ func TestSingleInstanceUnrelatedServiceUsesFallback(t *testing.T) {
 }
 
 func TestSingleInstanceUnavailablePortStillStarts(t *testing.T) {
-	listener, primary := acquireSingleInstanceAt([]string{"invalid address"})
+	listener, primary := acquireSingleInstanceAt([]string{"invalid address"}, true)
 	if !primary || listener != nil {
 		t.Fatal("a bind failure without an acknowledged instance must not prevent startup")
 	}

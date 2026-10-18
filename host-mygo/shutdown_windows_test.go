@@ -67,6 +67,7 @@ func TestMain(m *testing.M) {
 		return
 	}
 	if path := os.Getenv("ESP32_MYGO_QUIT_HELPER_CONFIG"); path != "" {
+		hidden := os.Getenv("ESP32_MYGO_QUIT_HELPER_HIDDEN") == "1"
 		quitCompleted := false
 		mygo.App.OnQuit(func() { quitCompleted = true })
 		mygo.App.WhenReady(func() {
@@ -76,11 +77,26 @@ func TestMain(m *testing.M) {
 				for _, w := range mygo.Windows() {
 					if w.Title() == "ESP32 AI 额度表 · MyGo" {
 						foundMain = true
+						if w.IsVisible() == hidden {
+							fmt.Fprintf(os.Stderr, "unexpected main visibility: visible=%v, autostart=%v\n", w.IsVisible(), hidden)
+							os.Exit(1)
+						}
+						if hidden {
+							w.Show()
+							if !w.IsVisible() {
+								fmt.Fprintln(os.Stderr, "could not show the hidden settings window")
+								os.Exit(1)
+							}
+						}
 						w.Close()
 						if w.IsDestroyed() {
 							fmt.Fprintln(os.Stderr, "ordinary close destroyed the main window")
 							os.Exit(1)
 						}
+					}
+					if w.Title() == "AI 额度悬浮窗 · MyGo" && !w.IsVisible() {
+						fmt.Fprintln(os.Stderr, "startup did not display the enabled overlay")
+						os.Exit(1)
 					}
 				}
 				if !foundMain {
@@ -90,7 +106,7 @@ func TestMain(m *testing.M) {
 				mygo.App.Quit() // Same entry point as the tray's Exit action.
 			})
 		})
-		RunGUI(loadConfig(path), path, nil, os.Getenv("ESP32_MYGO_QUIT_HELPER_PREVIEW") == "1")
+		RunGUI(loadConfig(path), path, nil, os.Getenv("ESP32_MYGO_QUIT_HELPER_PREVIEW") == "1", hidden)
 		if !quitCompleted || len(mygo.Windows()) != 0 {
 			fmt.Fprintln(os.Stderr, "native quit did not finish closing the windows")
 			os.Exit(1)
@@ -127,10 +143,13 @@ func TestNativeQuitExitsProcess(t *testing.T) {
 		name    string
 		overlay bool
 		preview bool
+		hidden  bool
 	}{
-		{"main_only", false, true},
-		{"with_overlay", true, true},
-		{"with_engine", true, false},
+		{"main_only", false, true, false},
+		{"with_overlay", true, true, false},
+		{"with_engine", true, false, false},
+		{"autostart_main_only", false, true, true},
+		{"autostart_with_overlay", true, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := defaultConfig()
@@ -148,6 +167,9 @@ func TestNativeQuitExitsProcess(t *testing.T) {
 				preview = "1"
 			}
 			cmd.Env = append(os.Environ(), "ESP32_MYGO_QUIT_HELPER_CONFIG="+path, "ESP32_MYGO_QUIT_HELPER_PREVIEW="+preview)
+			if tc.hidden {
+				cmd.Env = append(cmd.Env, "ESP32_MYGO_QUIT_HELPER_HIDDEN=1")
+			}
 			if output, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("native quit failed (%v): %v\n%s", ctx.Err(), err, output)
 			}

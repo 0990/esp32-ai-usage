@@ -198,28 +198,44 @@ func main() {
 	initFileLog()            // 尽早开日志文件，崩溃也有据可查
 	defer recoverLog("main") // 兜底：主 goroutine（含 UI 回调）panic 时落盘堆栈
 
-	cfgPath := defaultConfigPath()
-	preview := false
-	for _, arg := range os.Args[1:] {
-		if arg == "--preview" {
-			preview = true
-		} else if arg != "" {
-			cfgPath = arg
-		}
-	}
+	cfgPath, preview, startHidden := parseStartupArgs(os.Args[1:])
 	if cfgPath == defaultConfigPath() && !preview {
 		importLegacyConfig(cfgPath)
 	}
 
-	// 单实例：已有实例在运行则唤起它的窗口并退出，避免重复开窗。
-	ln, primary := acquireSingleInstance()
+	cfg := loadConfig(cfgPath)
+	// 每次正常运行都刷新已启用的自启项，迁移旧命令并跟随 exe 改名/移动。
+	// 在单实例检测之前执行，新位置的程序即使只唤起已有实例也能修复路径。
+	if !preview && cfg.Autostart {
+		if err := setAutostart(true, cfgPath); err != nil {
+			writeLogLine("[WARN][autostart] 更新开机启动失败: " + err.Error())
+		}
+	}
+	// 手动启动唤起已有窗口；自启只检测实例，不打扰当前窗口状态。
+	ln, primary := acquireSingleInstance(!startHidden)
 	if !primary {
 		return
 	}
 	if ln != nil {
 		defer ln.Close()
 	}
-	RunGUI(loadConfig(cfgPath), cfgPath, ln, preview)
+	RunGUI(cfg, cfgPath, ln, preview, startHidden)
+}
+
+func parseStartupArgs(args []string) (cfgPath string, preview, startHidden bool) {
+	cfgPath = defaultConfigPath()
+	for _, arg := range args {
+		switch arg {
+		case "--preview":
+			preview = true
+		case "--autostart":
+			startHidden = true
+		case "":
+		default:
+			cfgPath = arg
+		}
+	}
+	return
 }
 
 // 独立配置只在首次启动导入，后续编辑不影响 Fyne 版本。

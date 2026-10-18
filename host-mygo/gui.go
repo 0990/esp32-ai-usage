@@ -47,7 +47,7 @@ func newGUI(cfg Config, path string, preview bool) *GUI {
 	return &GUI{engine: NewEngine(cfg, path), draft: newSettingsDraft(cfg), preview: preview, status: "串口：未连接", activity: map[string]int{}, testJSON: sampleJSON, hooksText: activityHooksStatus()}
 }
 
-func RunGUI(cfg Config, path string, ln net.Listener, preview bool) {
+func RunGUI(cfg Config, path string, ln net.Listener, preview, startHidden bool) {
 	g := newGUI(cfg, path, preview)
 	mygo.App.OnWindowAllClosed(func() {})
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
@@ -105,7 +105,10 @@ func RunGUI(cfg Config, path string, ln net.Listener, preview bool) {
 			g.status = "预览模式 · 未启动串口及网络查询"
 		}
 		g.applyOverlay()
-		g.win.Show()
+		// 托盘创建失败时保留可操作入口，避免隐藏后无法打开程序。
+		if !startHidden || g.tray == nil {
+			g.win.Show()
+		}
 	})
 	if err := mygo.App.Run(); err != nil {
 		writeLogLine("[ERR][gui] " + err.Error())
@@ -386,7 +389,7 @@ func (g *GUI) saveSettings() {
 		return
 	}
 	if !g.preview {
-		err = setAutostart(cfg.Autostart)
+		err = setAutostart(cfg.Autostart, g.engine.cfgPath)
 	}
 	if err != nil {
 		g.message("配置已保存，开机启动设置失败："+err.Error(), true)
